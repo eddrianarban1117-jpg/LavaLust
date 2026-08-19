@@ -1,29 +1,23 @@
 AddDefaultCharset UTF-8
+
 <IfModule mod_rewrite.c>
     RewriteEngine On
 
-    # --------------------------------------------------
     # Allow index.php
     <Files "index.php">
         Require all granted
     </Files>
 
-    # --------------------------------------------------
-    # Deny access to sensitive directories
-    RedirectMatch 403 ^/(app|scheme|console|runtime)/
+    # Prevent directory browsing
+    Options -Indexes
 
-    # --------------------------------------------------
     # Deny access to sensitive files
     <FilesMatch "\.(env|json|xml|log|md|lock|git|ini|bak|sql)$">
         Require all denied
     </FilesMatch>
 
-    # --------------------------------------------------
-    # Prevent directory browsing
-    Options -Indexes
-
-    # --------------------------------------------------
-    # Route all requests through public/index.php
-    RewriteCond %{REQUEST_URI} !^/public/
-    RewriteRule ^(.*)$ public/$1 [L,QSA]
+    # Route all requests to index.php
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteCond %{REQUEST_FILENAME} !-d
+    RewriteRule ^ index.php [L,QSA]
 </IfModule>
