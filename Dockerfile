@@ -10,6 +10,9 @@ RUN a2enmod rewrite
 # Copy app files
 COPY . /var/www/html/
 
+# Remove root .htaccess because it blocks access to the public folder
+RUN rm -f /var/www/html/.htaccess
+
 # Set LavaLust public folder as Apache DocumentRoot
 RUN sed -i 's#DocumentRoot /var/www/html#DocumentRoot /var/www/html/public#g' \
     /etc/apache2/sites-available/000-default.conf
