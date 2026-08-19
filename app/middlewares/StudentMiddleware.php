@@ -9,11 +9,12 @@ class StudentMiddleware
             session_start();
         }
 
-        if (isset($_SESSION['student_access']) && $_SESSION['student_access'] === true) {
-            return $next();
+        if (!isset($_SESSION['student_access']) || $_SESSION['student_access'] !== true) {
+            redirect(site_url('student'));
+            return;
         }
 
-        redirect(site_url('student'));
+        return $next();
     }
 }
 ?>
