@@ -1,5 +1,6 @@
 <?php
 defined('PREVENT_DIRECT_ACCESS') OR exit('No direct script access allowed');
+
 /**
  * ------------------------------------------------------------------
  * LavaLust - an opensource lightweight PHP MVC Framework
@@ -53,11 +54,17 @@ $router->get('/users/create', 'UsersController::create');
 $router->post('/users/store', 'UsersController::store');
 
 // UPDATE
-$router->get('/users/edit/(:num)', 'UsersController::edit');
-$router->post('/users/update/(:num)', 'UsersController::update');
+$router->get('/users/edit/{id}', 'UsersController::edit')
+       ->where_number('id');
+
+$router->post('/users/update/{id}', 'UsersController::update')
+       ->where_number('id');
 
 // DELETE
-$router->get('/users/delete/(:num)', 'UsersController::delete');
+$router->get('/users/delete/{id}', 'UsersController::delete')
+       ->where_number('id');
 
 $router->get('/student', 'StudentController::index');
-$router->get('/student/profile', 'StudentController::profile')->middleware('student');
+
+$router->get('/student/profile', 'StudentController::profile')
+       ->middleware('student');
