@@ -242,22 +242,29 @@ class Database {
             ? $database_config['path']
             : null;
 
+        // Aiven MySQL SSL certificate path
+        $ca_file = dirname(dirname(__DIR__)) . DIRECTORY_SEPARATOR . 'ca.pem';
+
         switch ($driver) {
             case 'mysql':
                 $dsn = "mysql:host=$host;dbname=$dbname_value;charset=$charset;port=$port";
                 break;
+
             case 'pgsql':
                 $dsn = "pgsql:host=$host;port=$port;dbname=$dbname_value;user=$username;password=$password";
                 break;
+
             case 'sqlite':
                 if (empty($path)) {
                     throw new PDOException('SQLite requires a valid file path.');
                 }
                 $dsn = "sqlite:$path";
                 break;
+
             case 'sqlsrv':
                 $dsn = "sqlsrv:Server=$host,$port;Database=$dbname_value";
                 break;
+
             default:
                 throw new PDOException("Unsupported database driver: $driver");
         }
@@ -267,6 +274,17 @@ class Database {
             PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
             PDO::ATTR_EMULATE_PREPARES   => false,
         );
+
+        // Enable SSL for Aiven MySQL
+        if ($driver === 'mysql') {
+            if (!file_exists($ca_file)) {
+                throw new PDOException(
+                    'Aiven CA certificate not found: ' . $ca_file
+                );
+            }
+
+            $options[PDO::MYSQL_ATTR_SSL_CA] = $ca_file;
+        }
 
         try {
             $this->db = new PDO($dsn, $username, $password, $options);

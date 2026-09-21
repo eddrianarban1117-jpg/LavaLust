@@ -35,6 +35,7 @@ defined('PREVENT_DIRECT_ACCESS') OR exit('No direct script access allowed');
  * @license https://opensource.org/licenses/MIT MIT License
  */
 
+
 /*
 |--------------------------------------------------------------------------
 | Adding of middlewares
@@ -44,8 +45,43 @@ defined('PREVENT_DIRECT_ACCESS') OR exit('No direct script access allowed');
 |
 */
 
+
+/*
+|--------------------------------------------------------------------------
+| Student Middleware
+|--------------------------------------------------------------------------
+*/
+
 require_once APP_DIR . 'middlewares/StudentMiddleware.php';
 
+
+/*
+|--------------------------------------------------------------------------
+| Authentication Middleware
+|--------------------------------------------------------------------------
+*/
+
+require_once APP_DIR . 'middlewares/AuthMiddleware.php';
+
+
+/*
+|--------------------------------------------------------------------------
+| Middleware Configuration
+|--------------------------------------------------------------------------
+*/
+
 $config['middlewares'] = [
-    'student' => new StudentMiddleware()
+
+    /*
+    | Student route protection
+    */
+    'student' => new StudentMiddleware(),
+
+    /*
+    | Product authentication protection
+    */
+    'auth' => new AuthMiddleware()
+
 ];
+
+?>
