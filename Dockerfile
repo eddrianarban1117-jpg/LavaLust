@@ -1,4 +1,4 @@
-ARG PHP_VERSION=8.0
+ARG PHP_VERSION=8.3
 FROM php:${PHP_VERSION}-apache
 
 # Install PDO MySQL
@@ -6,6 +6,10 @@ RUN docker-php-ext-install pdo pdo_mysql
 
 # Enable Apache mod_rewrite
 RUN a2enmod rewrite
+
+# Render Docker secret files are readable by group 1000.
+RUN if ! getent group 1000 >/dev/null; then groupadd --gid 1000 render-secrets; fi \
+    && usermod --append --groups 1000 www-data
 
 # Copy app files
 COPY . /var/www/html/

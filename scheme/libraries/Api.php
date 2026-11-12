@@ -158,18 +158,20 @@ class Api
         $this->rate_limit_requests  = (int)  (config_item('rate_limit_requests') ?? $this->rate_limit_requests);
         $this->rate_limit_seconds   = (int)  (config_item('rate_limit_seconds') ?? $this->rate_limit_seconds);
 
-        if (empty($this->jwt_secret) || strlen($this->jwt_secret) < 32) {
-            show_error('JWT secret is missing or too weak. Use at least 32 random characters.');
-        }
-        if (empty($this->refresh_token_key) || strlen($this->refresh_token_key) < 32) {
-            show_error('Refresh token key is missing or too weak.');
-        }
-
         $this->handle_cors();
 
         if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
             http_response_code(204);
             exit;
+        }
+
+        if (
+            !is_string($this->jwt_secret)
+            || strlen($this->jwt_secret) < 32
+            || !is_string($this->refresh_token_key)
+            || strlen($this->refresh_token_key) < 32
+        ) {
+            $this->respond_error('Authentication is not configured on this server.', 503);
         }
     }
 
@@ -209,21 +211,25 @@ class Api
      *
      * @return void
      */
-    public function body()
+    public function body(bool $sanitize = true)
     {
         $contentType = $_SERVER['CONTENT_TYPE'] ?? '';
 
         if (stripos($contentType, 'application/json') !== false) {
             $input = json_decode(file_get_contents('php://input'), true);
-            return is_array($input) ? $this->sanitize_input($input) : [];
+            return is_array($input)
+                ? ($sanitize ? $this->sanitize_input($input) : $input)
+                : [];
         }
 
         if ($_POST) {
-            return $this->sanitize_input($_POST);
+            return $sanitize ? $this->sanitize_input($_POST) : $_POST;
         }
 
         parse_str(file_get_contents('php://input'), $formData);
-        return $this->sanitize_input($formData ?? []);
+        $formData = $formData ?? [];
+
+        return $sanitize ? $this->sanitize_input($formData) : $formData;
     }
 
     /**
@@ -265,6 +271,31 @@ class Api
         }
     }
 
+    public function require_trusted_origin(): void
+    {
+        $origin = $_SERVER['HTTP_ORIGIN'] ?? '';
+        if ($origin === '') {
+            return;
+        }
+
+        if (
+            is_array($this->allow_origin)
+            && in_array($origin, $this->allow_origin, true)
+        ) {
+            return;
+        }
+
+        $host = $_SERVER['HTTP_HOST'] ?? '';
+        $scheme = !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off'
+            ? 'https'
+            : 'http';
+        if ($host !== '' && hash_equals($scheme . '://' . $host, $origin)) {
+            return;
+        }
+
+        $this->respond_error('Untrusted request origin.', 403);
+    }
+
     /**
      * rate_limit
      *
@@ -282,13 +313,9 @@ class Api
         $requests = $requests ?? $this->rate_limit_requests;
         $seconds  = $seconds  ?? $this->rate_limit_seconds;
 
-        // Generate safe cache key (Windows-friendly)
-        if ($key === null) {
-            $ip = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
-            $raw_key = 'rate_limit:' . $ip;
-        } else {
-            $raw_key = 'rate_limit:' . $key;
-        }
+        // Keep independent clients from consuming one shared rate-limit bucket.
+        $ip = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
+        $raw_key = 'rate_limit:' . (string) ($key ?? 'default') . ':' . hash('sha256', $ip);
 
         // Replace unsafe characters for Windows filenames
         $safe_key = str_replace([':', '/', '\\', '*', '?', '"', '<', '>', '|'], '_', $raw_key);
@@ -308,6 +335,7 @@ class Api
             // New window
             $cache->write(1, $safe_key, $seconds);
             $cache->write($now, $safe_key . '_start', $seconds);
+            $window_start = $now;
             $remaining = $requests - 1;
         } else {
             if ($current >= $requests) {
@@ -389,13 +417,13 @@ class Api
      * base64UrlDecode
      *
      * @param string $data
-     * @return string
+     * @return string|false
      */
     private function base64UrlDecode($data)
     {
         $pad = strlen($data) % 4;
         if ($pad) $data .= str_repeat('=', 4 - $pad);
-        return base64_decode(strtr($data, '-_', '+/'));
+        return base64_decode(strtr($data, '-_', '+/'), true);
     }
 
     // --------------------------
@@ -440,14 +468,25 @@ class Api
         if (count($parts) !== 3) return null;
 
         [$headerEnc, $payloadEnc, $sigEnc] = $parts;
+        if (
+            !preg_match('/^[A-Za-z0-9_-]+$/D', $headerEnc)
+            || !preg_match('/^[A-Za-z0-9_-]+$/D', $payloadEnc)
+            || !preg_match('/^[A-Za-z0-9_-]+$/D', $sigEnc)
+        ) {
+            return null;
+        }
 
-        $header = json_decode($this->base64UrlDecode($headerEnc), true);
-        if (($header['alg'] ?? '') !== 'HS256') return null;
+        $header_json = $this->base64UrlDecode($headerEnc);
+        $payload_json = $this->base64UrlDecode($payloadEnc);
+        if ($header_json === false || $payload_json === false) return null;
+        $header = json_decode($header_json, true);
+        if (!is_array($header) || ($header['alg'] ?? '') !== 'HS256') return null;
 
         $validSig = hash_hmac('sha256', "$headerEnc.$payloadEnc", $this->jwt_secret, true);
         if (!hash_equals($this->base64UrlEncode($validSig), $sigEnc)) return null;
 
-        return json_decode($this->base64UrlDecode($payloadEnc), true);
+        $payload = json_decode($payload_json, true);
+        return is_array($payload) ? $payload : null;
     }
 
     /**
@@ -461,8 +500,14 @@ class Api
         $payload = $this->decode_jwt($token);
         if (!$payload) return null;
 
-        if (!isset($payload['sub'], $payload['exp'], $payload['iat'])) return null;
-        if ($payload['exp'] < time() || ($payload['iat'] ?? 0) > time()) return null;
+        if (
+            !isset($payload['sub'], $payload['exp'], $payload['iat'])
+            || !is_scalar($payload['sub'])
+            || !is_numeric($payload['exp'])
+            || !is_numeric($payload['iat'])
+        ) return null;
+        if ((int) $payload['exp'] <= time() || (int) $payload['iat'] > time()) return null;
+        if ((int) $payload['exp'] <= (int) $payload['iat']) return null;
         if (($payload['iss'] ?? '') !== $this->jwt_issuer || ($payload['aud'] ?? '') !== $this->jwt_audience) return null;
 
         return $payload;
@@ -482,7 +527,7 @@ class Api
             $header = $headers['Authorization'] ?? '';
         }
 
-        return preg_match('/Bearer\s(\S+)/i', $header, $matches) ? $matches[1] : null;
+        return preg_match('/^\s*Bearer\s+(\S+)\s*$/i', $header, $matches) ? $matches[1] : null;
     }
 
 
@@ -496,11 +541,55 @@ class Api
         $token = $this->get_bearer_token();
         $payload = $this->validate_jwt($token ?? '');
 
-        if (!$payload) {
+        $user_id = filter_var($payload['sub'] ?? null, FILTER_VALIDATE_INT);
+        $session_id = $payload['sid'] ?? null;
+        if (
+            !$payload
+            || ($payload['type'] ?? '') !== 'access'
+            || !$user_id
+            || !is_string($session_id)
+            || $session_id === ''
+        ) {
+            $this->respond_error('Unauthorized', 401);
+        }
+
+        $session = $this->_lava->db->raw(
+            "SELECT id FROM {$this->refresh_token_table}
+             WHERE user_id = ? AND jti = ? AND expires_at > NOW()
+             LIMIT 1",
+            [$user_id, $session_id]
+        )->fetch(PDO::FETCH_ASSOC);
+        if (!$session) {
             $this->respond_error('Unauthorized', 401);
         }
 
         return $payload;
+    }
+
+    public function require_roles(array $allowed_roles)
+    {
+        $payload = $this->require_jwt();
+        $user_id = filter_var($payload['sub'] ?? null, FILTER_VALIDATE_INT);
+        if (!$user_id) {
+            $this->respond_error('Unauthorized', 401);
+            return null;
+        }
+
+        $statement = $this->_lava->db->raw(
+            'SELECT id, username, email, role, is_active FROM users WHERE id = ? LIMIT 1',
+            [$user_id]
+        );
+        $user = $statement->fetch(PDO::FETCH_ASSOC);
+        if (!$user || (int) $user['is_active'] !== 1) {
+            $this->respond_error('Account is unavailable', 401);
+            return null;
+        }
+        if (!in_array($user['role'], $allowed_roles, true)) {
+            $this->respond_error('Forbidden', 403);
+            return null;
+        }
+
+        return $user;
     }
 
     // --------------------------
@@ -517,21 +606,27 @@ class Api
         $user_id = $user_data['id'];
         $now = time();
         $scopes = $user_data['scopes'] ?? ['read'];
+        $session_id = bin2hex(random_bytes(16));
 
         $access_payload = [
+            'type'  => 'access',
             'sub'   => $user_id,
             'role'  => $user_data['role'] ?? 'user',
             'scopes'=> $scopes,
+            'sid'   => $session_id,
         ];
 
         $refresh_payload = [
             'sub'  => $user_id,
             'type' => 'refresh',
-            'jti'  => bin2hex(random_bytes(16)),
+            'role' => $user_data['role'] ?? 'user',
+            'scopes' => $scopes,
+            'jti'  => $session_id,
+            'persistent' => !empty($user_data['remember']),
         ];
 
         $access_token  = $this->encode_jwt($access_payload);
-        $refresh_token = $this->encode_jwt($refresh_payload); // Raw for client
+        $refresh_token = $this->encode_jwt($refresh_payload);
 
         // Hash for DB storage (secure + prevents exposure on DB breach)
         $hashed_refresh = hash_hmac('sha256', (string) $refresh_token, $this->refresh_token_key);
@@ -552,43 +647,6 @@ class Api
             'expires_in'   => $this->payload_token_expiration,
             'token_type'   => 'Bearer'
         ];
-    }
-
-    /**
-     * refresh_access_token
-     *
-     * @param string $refresh_token
-     * @return void
-     */
-    public function refresh_access_token($refresh_token)
-    {
-        $payload = $this->validate_jwt($refresh_token);
-        if (!$payload || ($payload['type'] ?? '') !== 'refresh') {
-            $this->respond_error('Invalid refresh token', 403);
-        }
-
-        $hashed = hash_hmac('sha256', $refresh_token, $this->refresh_token_key);
-
-        $stmt = $this->_lava->db->raw(
-            "SELECT * FROM {$this->refresh_token_table} 
-             WHERE token = ? AND expires_at > NOW() LIMIT 1",
-            [$hashed]
-        );
-        $found = $stmt->fetch(PDO::FETCH_ASSOC);
-
-        if (!$found) {
-            $this->respond_error('Refresh token expired or revoked', 403);
-        }
-
-        // Revoke old + rotate (best practice)
-        $this->revoke_refresh_token($refresh_token);
-
-        $new_tokens = $this->issue_tokens(['id' => $payload['sub']]);
-
-        $this->respond([
-            'message' => 'Tokens refreshed successfully',
-            'tokens'  => $new_tokens
-        ]);
     }
 
     /**

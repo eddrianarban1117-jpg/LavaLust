@@ -3,7 +3,14 @@
 
 # Environment
 .env
+.env.*
 !.env.example
+
+# Certificates and private keys
+*.pem
+*.key
+*.p12
+*.pfx
 
 # Dependencies
 vendor/
@@ -14,8 +21,12 @@ composer.lock
 runtime/*
 !runtime/.htaccess
 !runtime/index.html
+/public/runtime/
+/public/kalingalink/
+/public/opcache_test.php
 *.log
 *.cache
+*.bak
 
 # IDE
 .idea/

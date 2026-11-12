@@ -243,7 +243,13 @@ class Database {
             : null;
 
         // Aiven MySQL SSL certificate path
-        $ca_file = dirname(dirname(__DIR__)) . DIRECTORY_SEPARATOR . 'ca.pem';
+        $ca_file = $database_config['ssl_ca'] ?? '';
+        $render_ca_file = '/etc/secrets/ca.pem';
+        if (($ca_file === '' || !is_file($ca_file)) && is_file($render_ca_file)) {
+            $ca_file = $render_ca_file;
+        } elseif ($ca_file === '') {
+            $ca_file = dirname(dirname(__DIR__)) . DIRECTORY_SEPARATOR . 'ca.pem';
+        }
 
         switch ($driver) {
             case 'mysql':
@@ -275,8 +281,11 @@ class Database {
             PDO::ATTR_EMULATE_PREPARES   => false,
         );
 
-        // Enable SSL for Aiven MySQL
-        if ($driver === 'mysql') {
+        // Local MySQL servers generally do not use the remote Aiven CA.
+        $is_local_mysql = in_array(strtolower((string) $host), ['localhost', '127.0.0.1', '::1'], true);
+
+        // Enable SSL for remote MySQL connections.
+        if ($driver === 'mysql' && (!$is_local_mysql || !empty($database_config['ssl_ca']))) {
             if (!file_exists($ca_file)) {
                 throw new PDOException(
                     'Aiven CA certificate not found: ' . $ca_file
@@ -290,6 +299,22 @@ class Database {
             $this->db = new PDO($dsn, $username, $password, $options);
             $this->driver = $this->db->getAttribute(PDO::ATTR_DRIVER_NAME);
         } catch (Exception $e) {
+            $error_info = $e instanceof PDOException && is_array($e->errorInfo)
+                ? $e->errorInfo
+                : [];
+            $log_message = preg_replace('/[\r\n]+/', ' ', $e->getMessage());
+            error_log(sprintf(
+                '[Database connection] host=%s port=%s database=%s ssl_ca_exists=%s ssl_ca_readable=%s sqlstate=%s driver_code=%s message=%s',
+                $host,
+                (string) $port,
+                $dbname_value,
+                is_file($ca_file) ? 'yes' : 'no',
+                is_readable($ca_file) ? 'yes' : 'no',
+                (string) ($error_info[0] ?? 'unavailable'),
+                (string) ($error_info[1] ?? 'unavailable'),
+                $log_message
+            ));
+
             $error = load_class('Errors', 'kernel');
             $error->show_database_error(
                 $e->getMessage(),

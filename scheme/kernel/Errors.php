@@ -136,6 +136,22 @@ class Errors
 	 */
 	public function show_database_error($message, $sql = '', $bindings = [], $exception = null, $template = 'error_db')
 	{
+		$request_path = parse_url($_SERVER['REQUEST_URI'] ?? '', PHP_URL_PATH);
+		if (is_string($request_path) && preg_match('#(?:^|/)api(?:/|$)#', $request_path)) {
+			$error_file = $exception ? $exception->getFile() : 'Unknown';
+			$error_line = $exception ? $exception->getLine() : 'Unknown';
+			$log_message = preg_replace('/[\r\n]+/', ' ', (string) $message);
+			error_log(sprintf('[API database error] %s in %s:%s', $log_message, $error_file, $error_line));
+
+			http_response_code(500);
+			header('Content-Type: application/json; charset=UTF-8');
+			echo json_encode([
+				'error' => 'The server could not complete this request because of a database error.',
+				'status' => 500,
+			], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+			exit();
+		}
+
 		$template_path = config_item('error_view_path');
 		if (empty($template_path)) {
 			$template_path = APP_DIR . 'views/errors/';
