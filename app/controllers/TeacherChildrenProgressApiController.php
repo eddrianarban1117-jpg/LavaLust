@@ -200,14 +200,12 @@ class TeacherChildrenProgressApiController extends Controller
         try {
             $this->db->table('learning_progress')->insert([
                 'child_id' => (int) $child_id,
-                'program_id' => null,
                 'teacher_user_id' => (int) $user['id'],
                 'domain' => $domain,
                 'skill' => $skill,
                 'rating' => (int) $rating,
                 'observation' => $observation !== '' ? $observation : null,
                 'recorded_at' => $recorded_at . ' ' . date('H:i:s'),
-                'created_at' => date('Y-m-d H:i:s'),
             ]);
             $this->db->commit();
         } catch (Throwable $error) {
