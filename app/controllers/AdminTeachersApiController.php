@@ -46,7 +46,11 @@ class AdminTeachersApiController extends Controller
                     v.title AS review_status, v.message AS review_note,
                     v.created_at AS reviewed_at, w.status AS workflow_status,
                     invite.email_status, invite.email_error,
-                    invite.sent_at AS message_sent_at
+                    COALESCE(invite.sent_at, (
+                        SELECT MAX(sent_invite.sent_at)
+                        FROM teacher_account_invitations sent_invite
+                        WHERE sent_invite.teacher_user_id = u.id
+                    )) AS message_sent_at
              FROM users u
              LEFT JOIN teacher_profiles tp ON tp.user_id = u.id
              LEFT JOIN cdcs d ON d.id = tp.cdc_id
@@ -322,6 +326,19 @@ class AdminTeachersApiController extends Controller
             if (!$current_workflow) {
                 throw new RuntimeException('Teacher verification workflow record is missing.');
             }
+            $existing_message = $this->find_existing_approval_message((int) $teacher['id']);
+            if ($existing_message
+                && ((int) $existing_message['has_sent'] === 1
+                    || (int) $existing_message['is_pending'] === 1)) {
+                $this->db->roll_back();
+                $this->api->respond_error(
+                    (int) $existing_message['has_sent'] === 1
+                        ? 'An approval message has already been sent. This teacher can no longer be reviewed.'
+                        : 'An approval message is being sent. Please wait for the delivery result before reviewing this teacher.',
+                    409
+                );
+                return;
+            }
             if ($action === 'approve'
                 && $current_workflow['status'] === 'approved_awaiting_acceptance') {
                 $this->db->roll_back();
@@ -444,6 +461,18 @@ class AdminTeachersApiController extends Controller
         ]);
     }
 
+    private function find_existing_approval_message($teacher_id)
+    {
+        return $this->db->raw(
+            'SELECT
+                MAX(sent_at IS NOT NULL OR email_status IN (\'sent\', \'accepted\')) AS has_sent,
+                MAX(email_status = \'pending\') AS is_pending
+             FROM teacher_account_invitations
+             WHERE teacher_user_id = ?',
+            [$teacher_id]
+        )->fetch(PDO::FETCH_ASSOC);
+    }
+
     public function send_message($id)
     {
         $this->api->require_method('POST');
@@ -482,6 +511,18 @@ class AdminTeachersApiController extends Controller
             if (!$is_awaiting_message && !$is_active) {
                 $this->db->roll_back();
                 $this->api->respond_error('This teacher account is no longer eligible for an approval message.', 409);
+                return;
+            }
+            $existing_message = $this->find_existing_approval_message((int) $teacher['id']);
+            if ((int) $existing_message['has_sent'] === 1
+                || (int) $existing_message['is_pending'] === 1) {
+                $this->db->roll_back();
+                $this->api->respond_error(
+                    (int) $existing_message['has_sent'] === 1
+                        ? 'The approval message has already been sent and cannot be sent again.'
+                        : 'The approval message is already being sent. Please wait for the delivery result.',
+                    409
+                );
                 return;
             }
             $this->db->raw(
@@ -537,7 +578,11 @@ class AdminTeachersApiController extends Controller
                     v.title AS review_status, v.message AS review_note,
                     v.created_at AS reviewed_at, w.status AS workflow_status,
                     invite.email_status, invite.email_error,
-                    invite.sent_at AS message_sent_at
+                    COALESCE(invite.sent_at, (
+                        SELECT MAX(sent_invite.sent_at)
+                        FROM teacher_account_invitations sent_invite
+                        WHERE sent_invite.teacher_user_id = u.id
+                    )) AS message_sent_at
              FROM users u
              LEFT JOIN teacher_profiles tp ON tp.user_id = u.id
              LEFT JOIN cdcs d ON d.id = tp.cdc_id
