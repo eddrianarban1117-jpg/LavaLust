@@ -24,6 +24,7 @@ class AdminDashboardApiController extends Controller
                 (SELECT COUNT(*) FROM cdcs WHERE status = \'active\') AS centers,
                 (SELECT COUNT(*) FROM children WHERE enrollment_status = \'enrolled\') AS enrolled_children,
                 (SELECT COUNT(*) FROM users WHERE role = \'teacher\' AND is_active = 1) AS teachers,
+                (SELECT COUNT(*) FROM users WHERE role = \'parent\' AND is_active = 1) AS parents,
                 (SELECT COUNT(*) FROM children WHERE enrollment_status <> \'withdrawn\') AS active_children',
         )->fetch(PDO::FETCH_ASSOC);
 
