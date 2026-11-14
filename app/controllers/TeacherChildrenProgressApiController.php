@@ -43,16 +43,16 @@ class TeacherChildrenProgressApiController extends Controller
 
         $records = $this->db->raw(
             'SELECT lp.id, lp.child_id, lp.domain, lp.skill, lp.rating,
-                    lp.observation, lp.recorded_at
-             FROM learning_progress lp
-             JOIN class_students cs ON cs.child_id = lp.child_id
-             JOIN classes cl ON cl.id = cs.class_id
-             JOIN teacher_profiles tp ON tp.cdc_id = cl.cdc_id
-             WHERE tp.user_id = ? AND tp.employment_status = \'active\'
-               AND cl.status = \'active\' AND lp.teacher_user_id = ?
-               AND lp.recorded_at >= ? AND lp.recorded_at < ?
-             GROUP BY lp.id
-             ORDER BY lp.recorded_at DESC, lp.id DESC',
+                   lp.observation, lp.recorded_at
+            FROM learning_progress lp
+            JOIN class_students cs ON cs.child_id = lp.child_id
+            JOIN classes cl ON cl.id = cs.class_id
+            JOIN teacher_profiles tp ON tp.cdc_id = cl.cdc_id
+            WHERE tp.user_id = ? AND tp.employment_status = \'active\'
+              AND cl.status = \'active\' AND lp.teacher_user_id = ?
+              AND lp.recorded_at >= ? AND lp.recorded_at < ?
+            GROUP BY lp.id
+            ORDER BY lp.recorded_at DESC, lp.id DESC',
             [$teacher_id, $teacher_id, $start, $end]
         )->fetchAll(PDO::FETCH_ASSOC);
 
