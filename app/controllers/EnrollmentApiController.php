@@ -21,10 +21,14 @@ class EnrollmentApiController extends Controller
     $this->api->require_method('GET');
 
     $sql = 'SELECT d.id, d.name, d.address, d.barangay, d.capacity, d.status,
-                assigned.id AS assigned_teacher_user_id,
-                TRIM(CONCAT_WS(\' \', assigned.first_name, assigned.last_name)) AS assigned_teacher_name,
-                CASE WHEN d.status = \'active\' AND review.title = \'Approved\'
-                           AND assigned.is_active = 1 AND tp.employment_status = \'active\'
+                COUNT(DISTINCT assigned.id) AS assigned_teacher_count,
+                MAX(assigned.id) AS assigned_teacher_user_id,
+                MAX(TRIM(CONCAT_WS(\' \', assigned.first_name, assigned.last_name))) AS assigned_teacher_name,
+                CASE WHEN d.status = \'active\'
+                           AND SUM(CASE WHEN review.title = \'Approved\'
+                                             AND assigned.is_active = 1
+                                             AND tp.employment_status = \'active\'
+                                        THEN 1 ELSE 0 END) = 1
                      THEN 1 ELSE 0 END AS enrollment_available
          FROM cdcs d
          LEFT JOIN teacher_profiles tp ON tp.cdc_id = d.id
@@ -45,7 +49,8 @@ class EnrollmentApiController extends Controller
         $sql .= ' AND d.status = \'active\'';
     }
 
-    $sql .= ' ORDER BY d.name, d.id';
+    $sql .= ' GROUP BY d.id, d.name, d.address, d.barangay, d.capacity, d.status
+              ORDER BY d.name, d.id';
 
     // Measure SQL execution
     $stmt = $this->db->raw($sql);
@@ -71,6 +76,7 @@ class EnrollmentApiController extends Controller
         $center['id'] = (int) $center['id'];
         $center['capacity'] = (int) $center['capacity'];
         $center['enrollment_available'] = (int) $center['enrollment_available'] === 1;
+        $center['assigned_teacher_count'] = (int) $center['assigned_teacher_count'];
 
         $center['assigned_teacher_user_id'] =
             $center['assigned_teacher_user_id'] !== null
@@ -79,11 +85,13 @@ class EnrollmentApiController extends Controller
 
         $center['availability_reason'] = $center['enrollment_available']
             ? 'Available'
-            : ($center['assigned_teacher_user_id'] === null
-                ? 'No approved teacher assigned'
+            : ($center['assigned_teacher_count'] === 0
+                ? 'No teacher assigned yet'
                 : ($center['status'] === 'inactive'
                     ? 'Inactive - not available for enrollment'
-                    : 'Assigned teacher is not currently approved and active'));
+                    : ($center['assigned_teacher_count'] > 1
+                        ? 'Only one approved and active teacher may be assigned'
+                        : 'Assigned teacher is not currently approved and active')));
     }
 
     unset($center);
