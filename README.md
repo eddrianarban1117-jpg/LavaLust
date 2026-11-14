@@ -162,6 +162,10 @@ limits CDC creation to those names and derives status from teacher assignments.
 The migration does not create missing CDC rows; add any missing center through
 the API using verified location details.
 
+Migration 027 adds private child profile-photo storage. Parents can upload a
+JPG or PNG photo (up to 2 MB) for their own child; active teachers can view it
+only while the child is in one of their active classes.
+
 The central notification migration adds notification categories, related
 modules, recipient-criteria snapshots, and idempotent publish keys. Notification
 recipient records are assigned when a notification is published; each

@@ -27,6 +27,7 @@ class TeacherChildrenProgressApiController extends Controller
 
         $students = $this->db->raw(
             'SELECT c.id, c.first_name, c.middle_name, c.last_name, c.nickname,
+                    (c.profile_photo IS NOT NULL AND c.profile_photo <> \'\') AS has_profile_photo,
                     c.birth_date, c.gender
              FROM class_students cs
              JOIN classes cl ON cl.id = cs.class_id
@@ -35,7 +36,7 @@ class TeacherChildrenProgressApiController extends Controller
              WHERE tp.user_id = ? AND tp.employment_status = \'active\'
                AND cl.status = \'active\' AND c.enrollment_status = \'enrolled\'
              GROUP BY c.id, c.first_name, c.middle_name, c.last_name,
-                      c.nickname, c.birth_date, c.gender
+                      c.nickname, c.birth_date, c.gender, c.profile_photo
              ORDER BY c.last_name, c.first_name, c.id',
             [$teacher_id]
         )->fetchAll(PDO::FETCH_ASSOC);

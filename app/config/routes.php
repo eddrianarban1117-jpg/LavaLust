@@ -46,6 +46,9 @@ $router->options('/api/parent/children', 'ParentChildrenApiController::index');
 $router->get('/api/parent/children', 'ParentChildrenApiController::index');
 $router->options('/api/parent/children/{id}', 'ParentChildrenApiController::update');
 $router->put('/api/parent/children/{id}', 'ParentChildrenApiController::update');
+$router->options('/api/parent/children/{id}/photo', 'ChildProfilePhotoApiController::upload_parent_photo');
+$router->get('/api/parent/children/{id}/photo', 'ChildProfilePhotoApiController::parent_photo');
+$router->post('/api/parent/children/{id}/photo', 'ChildProfilePhotoApiController::upload_parent_photo');
 $router->options('/api/parent/progress', 'ParentProgressApiController::index');
 $router->get('/api/parent/progress', 'ParentProgressApiController::index');
 $router->options('/api/parent/activities', 'ParentActivitiesApiController::index');
@@ -75,6 +78,8 @@ $router->options('/api/teacher/students', 'TeacherStudentsApiController::index')
 $router->get('/api/teacher/students', 'TeacherStudentsApiController::index');
 $router->options('/api/teacher/children-progress', 'TeacherChildrenProgressApiController::index');
 $router->get('/api/teacher/children-progress', 'TeacherChildrenProgressApiController::index');
+$router->options('/api/teacher/children-progress/{id}/photo', 'ChildProfilePhotoApiController::teacher_photo');
+$router->get('/api/teacher/children-progress/{id}/photo', 'ChildProfilePhotoApiController::teacher_photo');
 $router->post('/api/teacher/children-progress', 'TeacherChildrenProgressApiController::create');
 $router->options('/api/teacher/learning-activities', 'TeacherLearningActivitiesApiController::index');
 $router->get('/api/teacher/learning-activities', 'TeacherLearningActivitiesApiController::index');

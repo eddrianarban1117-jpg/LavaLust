@@ -18,6 +18,7 @@ class ParentChildrenApiController extends Controller
 
         $children = $this->db->raw(
                 'SELECT c.id, c.first_name, c.middle_name, c.last_name, c.suffix, c.nickname,
+                       (c.profile_photo IS NOT NULL AND c.profile_photo <> \'\') AS has_profile_photo,
                     c.birth_date, c.gender, c.enrollment_status,
                     c.psa_birth_certificate_number, c.nationality, c.place_of_birth,
                     c.address, c.enrolled_at, c.blood_type, c.allergies,
