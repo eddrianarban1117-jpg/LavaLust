@@ -295,6 +295,13 @@ class ChildTransfersApiController extends Controller
             return;
         } catch (Throwable $error) {
             $this->db->roll_back();
+            error_log(sprintf(
+                '[teacher transfer] %s in %s:%d: %s',
+                get_class($error),
+                $error->getFile(),
+                $error->getLine(),
+                preg_replace('/[\r\n]+/', ' ', $error->getMessage())
+            ));
             throw $error;
         }
 
