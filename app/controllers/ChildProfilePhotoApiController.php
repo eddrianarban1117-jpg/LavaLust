@@ -90,16 +90,26 @@ class ChildProfilePhotoApiController extends Controller
         $child = $this->db->raw(
             'SELECT c.profile_photo
              FROM children c
-             JOIN class_students cs ON cs.child_id = c.id
-             JOIN classes cl ON cl.id = cs.class_id
-             JOIN teacher_profiles tp ON tp.cdc_id = cl.cdc_id
-             WHERE c.id = ? AND tp.user_id = ?
-               AND tp.employment_status = \'active\'
-               AND cl.status = \'active\'
+             WHERE c.id = ?
                AND c.enrollment_status = \'enrolled\'
-             GROUP BY c.id, c.profile_photo
+               AND (
+                   EXISTS (
+                       SELECT 1
+                       FROM class_students cs
+                       JOIN classes cl ON cl.id = cs.class_id
+                       JOIN teacher_profiles tp ON tp.cdc_id = cl.cdc_id
+                       WHERE cs.child_id = c.id AND tp.user_id = ?
+                         AND tp.employment_status = \'active\' AND cl.status = \'active\'
+                   )
+                   OR EXISTS (
+                       SELECT 1 FROM child_transfer_requests transfer
+                       WHERE transfer.child_id = c.id
+                         AND transfer.receiving_teacher_user_id = ?
+                         AND transfer.status = \'awaiting_receiving_cdc\'
+                   )
+               )
              LIMIT 1',
-            [$child_id, (int) $teacher['id']]
+            [$child_id, (int) $teacher['id'], (int) $teacher['id']]
         )->fetch(PDO::FETCH_ASSOC);
         if (!$child) {
             $this->api->respond_error('Assigned child profile not found.', 404);

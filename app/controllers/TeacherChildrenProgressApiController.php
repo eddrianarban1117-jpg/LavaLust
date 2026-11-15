@@ -34,7 +34,8 @@ class TeacherChildrenProgressApiController extends Controller
              JOIN teacher_profiles tp ON tp.cdc_id = cl.cdc_id
              JOIN children c ON c.id = cs.child_id
              WHERE tp.user_id = ? AND tp.employment_status = \'active\'
-               AND cl.status = \'active\' AND c.enrollment_status = \'enrolled\'
+               AND cl.status = \'active\' AND c.class_id = cs.class_id
+               AND c.enrollment_status = \'enrolled\'
              GROUP BY c.id, c.first_name, c.middle_name, c.last_name,
                       c.nickname, c.birth_date, c.gender, c.profile_photo
              ORDER BY c.last_name, c.first_name, c.id',
@@ -187,7 +188,8 @@ class TeacherChildrenProgressApiController extends Controller
              JOIN classes cl ON cl.id = cs.class_id
              JOIN teacher_profiles tp ON tp.cdc_id = cl.cdc_id
              WHERE c.id = ? AND tp.user_id = ? AND tp.employment_status = \'active\'
-               AND cl.status = \'active\' AND c.enrollment_status = \'enrolled\'
+               AND cl.status = \'active\' AND c.class_id = cs.class_id
+               AND c.enrollment_status = \'enrolled\'
              GROUP BY c.id, c.parent_user_id, c.first_name, c.last_name
              LIMIT 1',
             [(int) $child_id, (int) $user['id']]

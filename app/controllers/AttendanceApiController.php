@@ -66,7 +66,7 @@ class AttendanceApiController extends Controller
                 WHERE c.enrollment_status = \'enrolled\' AND cl.status = \'active\'';
         $params = [$start_date];
         if ($user['role'] === 'teacher') {
-            $sql .= ' AND EXISTS (
+            $sql .= ' AND c.class_id = cl.id AND EXISTS (
                           SELECT 1 FROM teacher_profiles tp
                           WHERE tp.cdc_id = cl.cdc_id AND tp.user_id = ?
                             AND tp.employment_status = \'active\'
@@ -161,6 +161,7 @@ class AttendanceApiController extends Controller
                         JOIN children c ON c.id = ?
                         WHERE cl.id = ? AND cl.status = \'active\'
                           AND c.enrollment_status = \'enrolled\'
+                          AND c.class_id = cl.id
                           AND (
                               c.class_id = cl.id
                               OR EXISTS (

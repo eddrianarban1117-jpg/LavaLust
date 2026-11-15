@@ -18,6 +18,7 @@ class TeacherStudentsApiController extends Controller
 
         $students = $this->db->raw(
             'SELECT c.id, c.first_name, c.middle_name, c.last_name, c.nickname,
+                    (c.profile_photo IS NOT NULL AND c.profile_photo <> \'\') AS has_profile_photo,
                     c.birth_date, c.gender, c.address, c.medical_notes,
                     c.psa_birth_certificate_number, c.nationality, c.place_of_birth,
                     c.blood_type, c.allergies, c.immunization_status,
@@ -36,6 +37,8 @@ class TeacherStudentsApiController extends Controller
                        GROUP_CONCAT(DISTINCT cl.name ORDER BY cl.name SEPARATOR \', \') AS class_names
                 FROM class_students cs
                 JOIN classes cl ON cl.id = cs.class_id
+                JOIN children current_child
+                  ON current_child.id = cs.child_id AND current_child.class_id = cs.class_id
                 JOIN teacher_profiles tp ON tp.cdc_id = cl.cdc_id
                 WHERE tp.user_id = ? AND tp.employment_status = \'active\'
                   AND cl.status = \'active\'

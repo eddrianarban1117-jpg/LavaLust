@@ -38,6 +38,7 @@ class TeacherDashboardApiController extends Controller
              JOIN children c ON c.id = cs.child_id
              JOIN classes cl ON cl.id = cs.class_id
              WHERE cl.cdc_id = ? AND cl.status = \'active\'
+               AND c.class_id = cs.class_id
                AND c.enrollment_status = \'enrolled\'',
             [$cdc_id]
         )->fetch(PDO::FETCH_ASSOC)['total'];
@@ -97,6 +98,7 @@ class TeacherDashboardApiController extends Controller
              LEFT JOIN attendance_records ar
                 ON ar.child_id = c.id AND ar.class_id = cl.id AND ar.attendance_date = ?
              WHERE cl.cdc_id = ? AND cl.status = \'active\'
+               AND c.class_id = cs.class_id
                AND c.enrollment_status = \'enrolled\'
              ORDER BY cs.enrolled_at DESC, c.last_name, c.first_name
              LIMIT 5',
