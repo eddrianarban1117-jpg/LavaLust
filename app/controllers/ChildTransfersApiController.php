@@ -206,24 +206,6 @@ class ChildTransfersApiController extends Controller
                 throw new DomainException('The receiving CDC has reached its enrollment capacity.');
             }
 
-            $this->db->table('children')->where('id', $child_id)->update([
-                'class_id' => (int) $destination['class_id'],
-                'preferred_cdc_id' => (int) $destination['cdc_id'],
-                'updated_at' => $now,
-            ]);
-            $existing_roster = $this->db->table('class_students')
-                ->select('id')
-                ->where('class_id', (int) $destination['class_id'])
-                ->where('child_id', $child_id)
-                ->get();
-            if (!$existing_roster) {
-                $this->db->table('class_students')->insert([
-                    'class_id' => (int) $destination['class_id'],
-                    'child_id' => $child_id,
-                    'enrolled_at' => $now,
-                ]);
-            }
-
             $this->db->table('child_transfer_requests')->insert([
                 'reference' => 'TRF-' . strtoupper(bin2hex(random_bytes(5))),
                 'child_id' => $child_id,
@@ -236,56 +218,49 @@ class ChildTransfersApiController extends Controller
                 'other_reason' => $reason === 'Other' ? $other_reason : null,
                 'requested_date' => date('Y-m-d'),
                 'remarks' => $remarks !== '' ? $remarks : null,
-                'status' => 'completed',
+                'teacher_reported_parent_confirmation' => $parent_confirmation,
+                'status' => 'awaiting_receiving_cdc',
                 'current_teacher_approved_at' => $now,
-                'completed_at' => $now,
                 'created_at' => $now,
                 'updated_at' => $now,
             ]);
             $transfer_id = (int) $this->db->last_id();
-            $this->db->table('child_removal_records')->insert([
-                'child_id' => $child_id,
-                'parent_user_id' => (int) $child['parent_user_id'],
-                'actor_user_id' => (int) $teacher['id'],
-                'outcome' => 'transfer',
-                'reason_details' => $reason === 'Other' ? $other_reason : $reason,
-                'parent_confirmation' => $parent_confirmation,
-                'notes' => $remarks !== '' ? $remarks : null,
-                'previous_class_id' => (int) $child['class_id'],
-                'previous_cdc_id' => (int) $child['current_cdc_id'],
-                'previous_teacher_user_id' => (int) $teacher['id'],
-                'destination_class_id' => (int) $destination['class_id'],
-                'destination_cdc_id' => (int) $destination['cdc_id'],
-                'destination_teacher_user_id' => (int) $destination['teacher_id'],
-                'created_at' => $now,
-            ]);
             $child_name = $this->child_name($child);
             $reason_label = $reason === 'Other' ? $other_reason : $reason;
             $this->record_event(
                 $transfer_id,
                 (int) $teacher['id'],
-                'transfer_completed_by_current_teacher',
+                'approved_by_current_teacher',
                 $remarks
             );
             $this->notify_user(
                 (int) $child['parent_user_id'],
                 (int) $teacher['id'],
-                'Child transfer completed',
-                $child_name . ' has been transferred from ' . $child['current_teacher_name']
-                    . ' to ' . $destination['teacher_name'] . ' at ' . $destination['cdc_name']
-                    . ' on ' . date('F j, Y') . '. Parent/guardian confirmation as reported by the teacher: '
+                'Transfer awaiting receiving teacher',
+                $child_name . '\'s transfer request was submitted to '
+                    . $destination['teacher_name'] . ' at ' . $destination['cdc_name']
+                    . ' for acceptance. Parent/guardian confirmation as reported by the teacher: '
                     . ucfirst($parent_confirmation) . '. This records the teacher\'s report only.',
                 $transfer_id,
                 '/parent/children'
             );
+            $this->notify_user(
+                (int) $destination['teacher_id'],
+                (int) $teacher['id'],
+                'Incoming Child Transfer',
+                $child_name . ' has been referred to your CDC by '
+                    . $child['current_teacher_name'] . '. Review the student details and accept or decline the transfer.',
+                $transfer_id,
+                '/teacher/students'
+            );
             $this->notify_admins(
                 (int) $teacher['id'],
-                'Child transfer completed',
-                $child_name . ' (Child ID ' . $child_id . ') was transferred from '
+                'Child transfer awaiting acceptance',
+                $child_name . ' (Child ID ' . $child_id . ') was referred from '
                     . $child['current_teacher_name'] . ' (' . $child['current_cdc_name'] . ') to '
                     . $destination['teacher_name'] . ' (' . $destination['cdc_name'] . '). Reason: '
                     . $reason_label . '. Teacher-reported parent/guardian confirmation: '
-                    . ucfirst($parent_confirmation) . '. Transfer date: ' . date('F j, Y') . '.',
+                    . ucfirst($parent_confirmation) . '.',
                 $transfer_id
             );
             $this->db->commit();
@@ -307,7 +282,7 @@ class ChildTransfersApiController extends Controller
 
         $this->api->respond([
             'status' => true,
-            'message' => 'The child was transferred successfully.',
+            'message' => 'The transfer request was sent to the receiving teacher for acceptance.',
             'data' => ['transfer_id' => $transfer_id],
         ]);
     }
@@ -499,6 +474,10 @@ class ChildTransfersApiController extends Controller
         foreach ($requests as &$request) {
             $request['id'] = (int) $request['id'];
             $request['child_id'] = (int) $request['child_id'];
+            $request['previous_teacher_user_id'] = $request['previous_teacher_user_id'] !== null
+                ? (int) $request['previous_teacher_user_id']
+                : null;
+            $request['receiving_teacher_user_id'] = (int) $request['receiving_teacher_user_id'];
             $request['has_profile_photo'] = (int) $request['has_profile_photo'] === 1;
             $request['documents'] = $this->documents((int) $request['id']);
         }
@@ -573,6 +552,10 @@ class ChildTransfersApiController extends Controller
                 && $this->teacher_is_assigned((int) $teacher['id'], (int) $transfer['previous_cdc_id']);
             $receiving_reviewer = (int) $transfer['receiving_teacher_user_id'] === (int) $teacher['id']
                 && $transfer['status'] === 'awaiting_receiving_cdc'
+                && $this->teacher_is_assigned((int) $teacher['id'], (int) $transfer['destination_cdc_id']);
+            $legacy_receiving_reviewer = (int) $transfer['receiving_teacher_user_id'] === (int) $teacher['id']
+                && $transfer['status'] === 'completed'
+                && $transfer['receiving_teacher_accepted_at'] === null
                 && $this->teacher_is_assigned((int) $teacher['id'], (int) $transfer['destination_cdc_id']);
             $now = date('Y-m-d H:i:s');
             if ($action === 'dismiss' && $current_reviewer) {
@@ -649,6 +632,20 @@ class ChildTransfersApiController extends Controller
                     (int) $teacher['id'],
                     'Receiving CDC declined transfer',
                     $name . '\'s transfer request was declined by the receiving CDC. The child remains enrolled at the previous CDC.',
+                    '/parent/children',
+                    '/teacher/students'
+                );
+            } elseif ($action === 'accept' && $legacy_receiving_reviewer) {
+                $this->db->table('child_transfer_requests')->where('id', $transfer_id)->update([
+                    'receiving_teacher_accepted_at' => $now,
+                    'updated_at' => $now,
+                ]);
+                $this->record_event($transfer_id, (int) $teacher['id'], 'legacy_transfer_acknowledged', $remarks);
+                $this->notify_transfer_parties(
+                    $transfer,
+                    (int) $teacher['id'],
+                    'Transferee acknowledged',
+                    $this->child_name($transfer) . ' was acknowledged by the receiving teacher. The transfer had already been completed.',
                     '/parent/children',
                     '/teacher/students'
                 );
@@ -945,31 +942,47 @@ class ChildTransfersApiController extends Controller
     private function complete_transfer(array $transfer, $teacher_id, $remarks, $now)
     {
         $child = $this->db->raw(
-            'SELECT id, class_id, address, enrollment_status, first_name, middle_name, last_name
-             FROM children WHERE id = ? LIMIT 1 FOR UPDATE',
+            'SELECT c.id, c.class_id, c.address, c.enrollment_status,
+                    c.first_name, c.middle_name, c.last_name, cl.cdc_id AS current_cdc_id
+             FROM children c
+             LEFT JOIN classes cl ON cl.id = c.class_id
+             WHERE c.id = ? LIMIT 1 FOR UPDATE',
             [(int) $transfer['child_id']]
         )->fetch(PDO::FETCH_ASSOC);
-        if (!$child || $child['enrollment_status'] !== 'enrolled') {
-            throw new DomainException('The child is not currently enrolled and cannot be transferred.');
+        if (!$child || $child['enrollment_status'] !== 'enrolled'
+            || (int) $child['current_cdc_id'] !== (int) $transfer['previous_cdc_id']) {
+            throw new DomainException('The child is no longer enrolled at the previous CDC and cannot be transferred.');
         }
         $class = $this->db->raw(
-            'SELECT cl.id, cl.name, cl.cdc_id, d.capacity
+            'SELECT cl.id, cl.name, cl.cdc_id, cl.capacity AS class_capacity,
+                    d.capacity
              FROM classes cl
              JOIN cdcs d ON d.id = cl.cdc_id
              JOIN teacher_profiles tp ON tp.cdc_id = cl.cdc_id
              JOIN users u ON u.id = tp.user_id
              WHERE cl.cdc_id = ? AND cl.status = \'active\' AND d.status = \'active\'
                AND tp.user_id = ? AND tp.employment_status = \'active\' AND u.is_active = 1
+               AND (cl.teacher_user_id = u.id OR cl.teacher_user_id IS NULL)
              ORDER BY cl.id LIMIT 1 FOR UPDATE',
             [(int) $transfer['destination_cdc_id'], $teacher_id]
         )->fetch(PDO::FETCH_ASSOC);
         if (!$class) {
             throw new DomainException('The receiving CDC no longer has an active class assigned to you.');
         }
+        $class_enrolled_count = (int) $this->db->raw(
+            'SELECT COUNT(*) AS total FROM children
+             WHERE class_id = ? AND enrollment_status = \'enrolled\'',
+            [(int) $class['id']]
+        )->fetch(PDO::FETCH_ASSOC)['total'];
+        if ((int) $class['class_capacity'] > 0
+            && $class_enrolled_count >= (int) $class['class_capacity']) {
+            throw new DomainException('The receiving class has reached its enrollment capacity.');
+        }
         $enrolled_count = (int) $this->db->raw(
             'SELECT COUNT(*) AS total
-             FROM children
-             WHERE preferred_cdc_id = ? AND enrollment_status = \'enrolled\'',
+             FROM children c
+             JOIN classes cl ON cl.id = c.class_id
+             WHERE cl.cdc_id = ? AND c.enrollment_status = \'enrolled\'',
             [(int) $class['cdc_id']]
         )->fetch(PDO::FETCH_ASSOC)['total'];
         if ((int) $class['capacity'] > 0 && $enrolled_count >= (int) $class['capacity']) {
@@ -1010,6 +1023,36 @@ class ChildTransfersApiController extends Controller
             'completed_at' => $now,
             'updated_at' => $now,
         ]);
+        if (in_array($transfer['teacher_reported_parent_confirmation'] ?? null, ['yes', 'no'], true)) {
+            $notes = array_filter([
+                trim((string) ($transfer['remarks'] ?? '')),
+                trim((string) $remarks),
+            ], static function ($note) {
+                return $note !== '';
+            });
+            $this->db->table('child_removal_records')->insert([
+                'child_id' => (int) $child['id'],
+                'parent_user_id' => (int) $transfer['parent_user_id'],
+                'actor_user_id' => $transfer['previous_teacher_user_id']
+                    ? (int) $transfer['previous_teacher_user_id']
+                    : $teacher_id,
+                'outcome' => 'transfer',
+                'reason_details' => $transfer['reason'] === 'Other'
+                    ? ($transfer['other_reason'] ?? 'Other')
+                    : $transfer['reason'],
+                'parent_confirmation' => $transfer['teacher_reported_parent_confirmation'],
+                'notes' => $notes ? implode("\n\n", $notes) : null,
+                'previous_class_id' => (int) $child['class_id'],
+                'previous_cdc_id' => (int) $transfer['previous_cdc_id'],
+                'previous_teacher_user_id' => $transfer['previous_teacher_user_id']
+                    ? (int) $transfer['previous_teacher_user_id']
+                    : null,
+                'destination_class_id' => (int) $class['id'],
+                'destination_cdc_id' => (int) $class['cdc_id'],
+                'destination_teacher_user_id' => $teacher_id,
+                'created_at' => $now,
+            ]);
+        }
         $name = $this->child_name($child);
         $this->record_event((int) $transfer['id'], $teacher_id, 'accepted_by_receiving_cdc', $remarks);
         $this->record_event((int) $transfer['id'], $teacher_id, 'transfer_completed', null);
