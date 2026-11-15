@@ -63,11 +63,15 @@ $router->get('/api/teacher/child-transfers/options', 'ChildTransfersApiControlle
 $router->options('/api/teacher/children/{id}/transfers', 'ChildTransfersApiController::teacher_child_history');
 $router->get('/api/teacher/children/{id}/transfers', 'ChildTransfersApiController::teacher_child_history');
 $router->post('/api/teacher/children/{id}/transfers', 'ChildTransfersApiController::teacher_create');
+$router->options('/api/teacher/children/{id}/removal', 'ChildTransfersApiController::teacher_remove');
+$router->post('/api/teacher/children/{id}/removal', 'ChildTransfersApiController::teacher_remove');
 $router->options('/api/teacher/child-transfers/{id}', 'ChildTransfersApiController::teacher_update');
 $router->get('/api/teacher/child-transfers/{id}', 'ChildTransfersApiController::teacher_show');
 $router->patch('/api/teacher/child-transfers/{id}', 'ChildTransfersApiController::teacher_update');
 $router->options('/api/admin/child-transfers', 'ChildTransfersApiController::admin_index');
 $router->get('/api/admin/child-transfers', 'ChildTransfersApiController::admin_index');
+$router->options('/api/admin/child-removals', 'ChildTransfersApiController::admin_removals');
+$router->get('/api/admin/child-removals', 'ChildTransfersApiController::admin_removals');
 $router->options('/api/child-transfers/{id}/documents/{document_id}', 'ChildTransfersApiController::download_document');
 $router->get('/api/child-transfers/{id}/documents/{document_id}', 'ChildTransfersApiController::download_document');
 $router->options('/api/parent/progress', 'ParentProgressApiController::index');

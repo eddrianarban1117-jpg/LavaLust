@@ -57,6 +57,7 @@ class ChildTransfersApiController extends Controller
                AND EXISTS (
                    SELECT 1 FROM classes cl
                    WHERE cl.cdc_id = d.id AND cl.status = \'active\'
+                     AND (cl.teacher_user_id = teacher.id OR cl.teacher_user_id IS NULL)
                )
                AND EXISTS (
                    SELECT 1 FROM notifications approval
@@ -97,14 +98,25 @@ class ChildTransfersApiController extends Controller
             $this->api->respond_error('Provide the transfer details.', 400);
             return;
         }
+        if (!is_string($input['reason'] ?? null)
+            || !is_string($input['other_reason'] ?? '')
+            || !is_string($input['remarks'] ?? '')
+            || !is_string($input['parent_confirmation'] ?? null)) {
+            $this->api->respond_error('Provide valid transfer details.', 400);
+            return;
+        }
         $destination_id = filter_var($input['destination_cdc_id'] ?? null, FILTER_VALIDATE_INT);
+        $receiving_teacher_id = filter_var($input['receiving_teacher_user_id'] ?? null, FILTER_VALIDATE_INT);
         $reason = trim((string) ($input['reason'] ?? ''));
         $other_reason = trim((string) ($input['other_reason'] ?? ''));
         $remarks = trim((string) ($input['remarks'] ?? ''));
-        if (!$destination_id || !in_array($reason, self::REASONS, true)
+        $parent_confirmation = $input['parent_confirmation'];
+        if (!$destination_id || !$receiving_teacher_id
+            || !in_array($parent_confirmation, ['yes', 'no'], true)
+            || !in_array($reason, self::REASONS, true)
             || ($reason === 'Other' && $other_reason === '')
             || mb_strlen($other_reason) > 500 || mb_strlen($remarks) > 5000) {
-            $this->api->respond_error('Choose a receiving CDC and a valid transfer reason.', 400);
+            $this->api->respond_error('Choose a receiving CDC and teacher, record parent confirmation, and provide a valid transfer reason.', 400);
             return;
         }
 
@@ -156,7 +168,8 @@ class ChildTransfersApiController extends Controller
                  JOIN teacher_profiles tp ON tp.cdc_id = d.id
                  JOIN users teacher ON teacher.id = tp.user_id
                  JOIN classes cl ON cl.cdc_id = d.id AND cl.status = \'active\'
-                 WHERE d.id = ? AND d.status = \'active\'
+                   AND (cl.teacher_user_id = teacher.id OR cl.teacher_user_id IS NULL)
+                 WHERE d.id = ? AND teacher.id = ? AND d.status = \'active\'
                    AND tp.employment_status = \'active\'
                    AND teacher.role = \'teacher\' AND teacher.is_active = 1
                    AND EXISTS (
@@ -166,7 +179,7 @@ class ChildTransfersApiController extends Controller
                          AND approval.title = \'Approved\'
                    )
                  ORDER BY cl.id LIMIT 1 FOR UPDATE',
-                [(int) $destination_id]
+                [(int) $destination_id, (int) $receiving_teacher_id]
             )->fetch(PDO::FETCH_ASSOC);
             if (!$destination) {
                 throw new DomainException('The selected CDC has no active, approved receiving teacher and class.');
@@ -230,6 +243,22 @@ class ChildTransfersApiController extends Controller
                 'updated_at' => $now,
             ]);
             $transfer_id = (int) $this->db->last_id();
+            $this->db->table('child_removal_records')->insert([
+                'child_id' => $child_id,
+                'parent_user_id' => (int) $child['parent_user_id'],
+                'actor_user_id' => (int) $teacher['id'],
+                'outcome' => 'transfer',
+                'reason_details' => $reason === 'Other' ? $other_reason : $reason,
+                'parent_confirmation' => $parent_confirmation,
+                'notes' => $remarks !== '' ? $remarks : null,
+                'previous_class_id' => (int) $child['class_id'],
+                'previous_cdc_id' => (int) $child['current_cdc_id'],
+                'previous_teacher_user_id' => (int) $teacher['id'],
+                'destination_class_id' => (int) $destination['class_id'],
+                'destination_cdc_id' => (int) $destination['cdc_id'],
+                'destination_teacher_user_id' => (int) $destination['teacher_id'],
+                'created_at' => $now,
+            ]);
             $child_name = $this->child_name($child);
             $reason_label = $reason === 'Other' ? $other_reason : $reason;
             $this->record_event(
@@ -244,7 +273,8 @@ class ChildTransfersApiController extends Controller
                 'Child transfer completed',
                 $child_name . ' has been transferred from ' . $child['current_teacher_name']
                     . ' to ' . $destination['teacher_name'] . ' at ' . $destination['cdc_name']
-                    . ' on ' . date('F j, Y') . '.',
+                    . ' on ' . date('F j, Y') . '. Parent/guardian confirmation as reported by the teacher: '
+                    . ucfirst($parent_confirmation) . '. This records the teacher\'s report only.',
                 $transfer_id,
                 '/parent/children'
             );
@@ -254,7 +284,8 @@ class ChildTransfersApiController extends Controller
                 $child_name . ' (Child ID ' . $child_id . ') was transferred from '
                     . $child['current_teacher_name'] . ' (' . $child['current_cdc_name'] . ') to '
                     . $destination['teacher_name'] . ' (' . $destination['cdc_name'] . '). Reason: '
-                    . $reason_label . '. Transfer date: ' . date('F j, Y') . '.',
+                    . $reason_label . '. Teacher-reported parent/guardian confirmation: '
+                    . ucfirst($parent_confirmation) . '. Transfer date: ' . date('F j, Y') . '.',
                 $transfer_id
             );
             $this->db->commit();
@@ -663,6 +694,181 @@ class ChildTransfersApiController extends Controller
         $this->api->respond(['status' => true, 'data' => $requests]);
     }
 
+    public function teacher_remove($child_id)
+    {
+        $this->api->require_method('POST');
+        $teacher = $this->authenticated_teacher();
+        if (!$teacher) return;
+        $child_id = $this->valid_id($child_id);
+        if (!$child_id) return;
+
+        $input = $this->api->body(false);
+        if (!is_array($input)) {
+            $this->api->respond_error('Provide the student removal details.', 400);
+            return;
+        }
+        if (!is_string($input['outcome'] ?? null)
+            || !is_string($input['reason_details'] ?? '')
+            || !is_string($input['parent_confirmation'] ?? null)
+            || !is_string($input['notes'] ?? '')) {
+            $this->api->respond_error('Provide valid student removal details.', 400);
+            return;
+        }
+        $outcome = trim((string) ($input['outcome'] ?? ''));
+        $reason_details = trim((string) ($input['reason_details'] ?? ''));
+        $parent_confirmation = $input['parent_confirmation'] ?? '';
+        $notes = trim((string) ($input['notes'] ?? ''));
+        if (!in_array($outcome, ['dropped', 'deceased', 'other'], true)
+            || !in_array($parent_confirmation, ['yes', 'no'], true)
+            || ($outcome === 'other' && $reason_details === '')
+            || mb_strlen($reason_details) > 500 || mb_strlen($notes) > 5000) {
+            $this->api->respond_error('Choose a valid removal reason and record parent/guardian confirmation.', 400);
+            return;
+        }
+
+        $now = date('Y-m-d H:i:s');
+        $this->db->transaction();
+        try {
+            $child = $this->db->raw(
+                'SELECT c.id, c.parent_user_id, c.class_id, c.preferred_cdc_id,
+                        c.enrollment_status, c.first_name, c.middle_name, c.last_name,
+                        cl.cdc_id AS current_cdc_id,
+                        TRIM(CONCAT_WS(\' \', current_teacher.first_name, current_teacher.last_name)) AS current_teacher_name,
+                        current_cdc.name AS current_cdc_name
+                 FROM children c
+                 JOIN classes cl ON cl.id = c.class_id
+                 JOIN cdcs current_cdc ON current_cdc.id = cl.cdc_id
+                 JOIN class_students cs ON cs.child_id = c.id AND cs.class_id = c.class_id
+                 JOIN teacher_profiles current_profile ON current_profile.cdc_id = cl.cdc_id
+                 JOIN users current_teacher ON current_teacher.id = current_profile.user_id
+                 WHERE c.id = ? AND c.enrollment_status = \'enrolled\'
+                   AND cl.status = \'active\' AND current_cdc.status = \'active\'
+                   AND current_profile.user_id = ?
+                   AND current_profile.employment_status = \'active\'
+                   AND current_teacher.role = \'teacher\' AND current_teacher.is_active = 1
+                 LIMIT 1 FOR UPDATE',
+                [$child_id, (int) $teacher['id']]
+            )->fetch(PDO::FETCH_ASSOC);
+            if (!$child) {
+                throw new DomainException('This child is not currently enrolled in one of your active classes.');
+            }
+
+            $pending = $this->db->raw(
+                'SELECT id FROM child_transfer_requests
+                 WHERE child_id = ? AND status IN (\'pending\', \'awaiting_receiving_cdc\')
+                 LIMIT 1 FOR UPDATE',
+                [$child_id]
+            )->fetch(PDO::FETCH_ASSOC);
+            if ($pending) {
+                throw new DomainException('An older transfer request for this child is still awaiting review.');
+            }
+
+            $record_details = $outcome === 'other' ? $reason_details : null;
+            $this->db->table('child_removal_records')->insert([
+                'child_id' => $child_id,
+                'parent_user_id' => (int) $child['parent_user_id'],
+                'actor_user_id' => (int) $teacher['id'],
+                'outcome' => $outcome,
+                'reason_details' => $record_details,
+                'parent_confirmation' => $parent_confirmation,
+                'notes' => $notes !== '' ? $notes : null,
+                'previous_class_id' => (int) $child['class_id'],
+                'previous_cdc_id' => (int) $child['current_cdc_id'],
+                'previous_teacher_user_id' => (int) $teacher['id'],
+                'destination_class_id' => null,
+                'destination_cdc_id' => null,
+                'destination_teacher_user_id' => null,
+                'created_at' => $now,
+            ]);
+            $record_id = (int) $this->db->last_id();
+            $this->db->table('children')->where('id', $child_id)->update([
+                'class_id' => null,
+                'preferred_cdc_id' => null,
+                'enrollment_status' => 'withdrawn',
+                'updated_at' => $now,
+            ]);
+
+            $child_name = $this->child_name($child);
+            $reason_label = $outcome === 'other' ? $reason_details : ucfirst($outcome);
+            $confirmation = ucfirst($parent_confirmation);
+            $message = $child_name . '\'s student record was marked ' . $reason_label . ' by '
+                . $child['current_teacher_name'] . '. Teacher-reported parent/guardian confirmation: '
+                . $confirmation . '. This records the teacher\'s report only.';
+            $this->notify_removal_user(
+                (int) $child['parent_user_id'],
+                (int) $teacher['id'],
+                'Student record updated',
+                $message,
+                $record_id,
+                '/parent/children'
+            );
+            $admins = $this->db->raw(
+                'SELECT id FROM users WHERE role = \'admin\' AND is_active = 1'
+            )->fetchAll(PDO::FETCH_COLUMN);
+            foreach ($admins as $admin_id) {
+                if ((int) $admin_id !== (int) $teacher['id']) {
+                    $this->notify_removal_user(
+                        (int) $admin_id,
+                        (int) $teacher['id'],
+                        'Student removal recorded',
+                        $child_name . ' (Child ID ' . $child_id . ') was marked ' . $reason_label
+                            . ' by ' . $child['current_teacher_name'] . ' at '
+                            . $child['current_cdc_name'] . '. Teacher-reported parent/guardian confirmation: '
+                            . $confirmation . '.',
+                        $record_id,
+                        '/admin/children'
+                    );
+                }
+            }
+            $this->db->commit();
+        } catch (DomainException $error) {
+            $this->db->roll_back();
+            $this->api->respond_error($error->getMessage(), 409);
+            return;
+        } catch (Throwable $error) {
+            $this->db->roll_back();
+            throw $error;
+        }
+
+        $this->api->respond([
+            'status' => true,
+            'message' => 'The student was removed from the active roster. Their profile and history were retained.',
+            'data' => ['removal_id' => $record_id],
+        ]);
+    }
+
+    public function admin_removals()
+    {
+        $this->api->require_method('GET');
+        if (!$this->authenticated_admin()) return;
+
+        $records = $this->db->raw(
+            'SELECT r.id, r.child_id, r.outcome, r.reason_details, r.parent_confirmation,
+                    r.notes, r.created_at,
+                    TRIM(CONCAT_WS(\' \', c.first_name, c.middle_name, c.last_name)) AS child_name,
+                    c.enrollment_status,
+                    TRIM(CONCAT_WS(\' \', parent.first_name, parent.last_name)) AS parent_name,
+                    TRIM(CONCAT_WS(\' \', actor.first_name, actor.last_name)) AS teacher_name,
+                    previous.name AS previous_cdc_name,
+                    destination.name AS destination_cdc_name,
+                    TRIM(CONCAT_WS(\' \', receiving.first_name, receiving.last_name)) AS receiving_teacher_name
+             FROM child_removal_records r
+             JOIN children c ON c.id = r.child_id
+             JOIN users parent ON parent.id = r.parent_user_id
+             LEFT JOIN users actor ON actor.id = r.actor_user_id
+             LEFT JOIN cdcs previous ON previous.id = r.previous_cdc_id
+             LEFT JOIN cdcs destination ON destination.id = r.destination_cdc_id
+             LEFT JOIN users receiving ON receiving.id = r.destination_teacher_user_id
+             ORDER BY r.created_at DESC, r.id DESC'
+        )->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($records as &$record) {
+            $record['id'] = (int) $record['id'];
+            $record['child_id'] = (int) $record['child_id'];
+        }
+        unset($record);
+        $this->api->respond(['status' => true, 'data' => $records]);
+    }
+
     public function teacher_child_history($child_id)
     {
         $this->api->require_method('GET');
@@ -941,6 +1147,28 @@ class ChildTransfersApiController extends Controller
             'related_type' => 'child_transfer',
             'related_id' => (int) $transfer_id,
             'related_module' => 'child_transfers',
+            'notification_type' => 'System Update',
+            'action_url' => $action_url,
+            'created_at' => date('Y-m-d H:i:s'),
+        ]);
+        $this->db->table('notification_recipients')->insert([
+            'notification_id' => (int) $this->db->last_id(),
+            'user_id' => (int) $user_id,
+            'created_at' => date('Y-m-d H:i:s'),
+        ]);
+    }
+
+    private function notify_removal_user($user_id, $actor_id, $title, $message, $record_id, $action_url)
+    {
+        if (!$user_id) return;
+        $this->db->table('notifications')->insert([
+            'actor_user_id' => $actor_id ?: null,
+            'title' => $title,
+            'message' => $message,
+            'audience' => 'single',
+            'related_type' => 'child_removal',
+            'related_id' => (int) $record_id,
+            'related_module' => 'child_removals',
             'notification_type' => 'System Update',
             'action_url' => $action_url,
             'created_at' => date('Y-m-d H:i:s'),

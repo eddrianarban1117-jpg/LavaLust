@@ -253,11 +253,60 @@ class AdminChildrenApiController extends Controller
         }
         unset($application);
 
+        $history = null;
+        if ($reviewer['role'] === 'admin') {
+            $history = [
+                'attendance' => $this->db->raw(
+                    'SELECT ar.id, ar.attendance_date, ar.status, ar.time_in, ar.remarks,
+                            cl.name AS class_name, d.name AS cdc_name,
+                            TRIM(CONCAT_WS(\' \', teacher.first_name, teacher.last_name)) AS teacher_name
+                     FROM attendance_records ar
+                     LEFT JOIN classes cl ON cl.id = ar.class_id
+                     LEFT JOIN cdcs d ON d.id = cl.cdc_id
+                     LEFT JOIN users teacher ON teacher.id = ar.teacher_user_id
+                     WHERE ar.child_id = ?
+                     ORDER BY ar.attendance_date DESC, ar.id DESC LIMIT 200',
+                    [$child_id]
+                )->fetchAll(PDO::FETCH_ASSOC),
+                'progress' => $this->db->raw(
+                    'SELECT lp.id, lp.domain, lp.skill, lp.rating, lp.observation, lp.recorded_at,
+                            TRIM(CONCAT_WS(\' \', teacher.first_name, teacher.last_name)) AS teacher_name
+                     FROM learning_progress lp
+                     LEFT JOIN users teacher ON teacher.id = lp.teacher_user_id
+                     WHERE lp.child_id = ? ORDER BY lp.recorded_at DESC, lp.id DESC LIMIT 200',
+                    [$child_id]
+                )->fetchAll(PDO::FETCH_ASSOC),
+                'transfers' => $this->db->raw(
+                    'SELECT t.id, t.reference, t.reason, t.other_reason, t.status,
+                            t.requested_date, t.completed_at, previous.name AS previous_cdc_name,
+                            destination.name AS destination_cdc_name
+                     FROM child_transfer_requests t
+                     LEFT JOIN cdcs previous ON previous.id = t.previous_cdc_id
+                     LEFT JOIN cdcs destination ON destination.id = t.destination_cdc_id
+                     WHERE t.child_id = ? ORDER BY t.created_at DESC, t.id DESC LIMIT 100',
+                    [$child_id]
+                )->fetchAll(PDO::FETCH_ASSOC),
+                'removals' => $this->db->raw(
+                    'SELECT r.id, r.outcome, r.reason_details, r.parent_confirmation, r.notes,
+                            r.created_at, previous.name AS previous_cdc_name,
+                            destination.name AS destination_cdc_name,
+                            TRIM(CONCAT_WS(\' \', actor.first_name, actor.last_name)) AS teacher_name
+                     FROM child_removal_records r
+                     LEFT JOIN cdcs previous ON previous.id = r.previous_cdc_id
+                     LEFT JOIN cdcs destination ON destination.id = r.destination_cdc_id
+                     LEFT JOIN users actor ON actor.id = r.actor_user_id
+                     WHERE r.child_id = ? ORDER BY r.created_at DESC, r.id DESC',
+                    [$child_id]
+                )->fetchAll(PDO::FETCH_ASSOC),
+            ];
+        }
+
         $this->api->respond([
             'status' => true,
             'data' => [
                 'child' => $child,
                 'applications' => $applications,
+                'history' => $history,
             ],
         ]);
     }
