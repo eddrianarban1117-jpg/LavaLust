@@ -1158,8 +1158,9 @@ class ChildTransfersApiController extends Controller
             'action_url' => $action_url,
             'created_at' => date('Y-m-d H:i:s'),
         ]);
+        $notification_id = (int) $this->db->last_id();
         $this->db->table('notification_recipients')->insert([
-            'notification_id' => (int) $this->db->last_id(),
+            'notification_id' => $notification_id,
             'user_id' => (int) $user_id,
             'created_at' => date('Y-m-d H:i:s'),
         ]);
@@ -1180,8 +1181,9 @@ class ChildTransfersApiController extends Controller
             'action_url' => $action_url,
             'created_at' => date('Y-m-d H:i:s'),
         ]);
+        $notification_id = (int) $this->db->last_id();
         $this->db->table('notification_recipients')->insert([
-            'notification_id' => (int) $this->db->last_id(),
+            'notification_id' => $notification_id,
             'user_id' => (int) $user_id,
             'created_at' => date('Y-m-d H:i:s'),
         ]);
