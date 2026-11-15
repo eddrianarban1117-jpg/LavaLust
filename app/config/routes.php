@@ -58,8 +58,11 @@ $router->options('/api/parent/child-transfers/{id}', 'ChildTransfersApiControlle
 $router->patch('/api/parent/child-transfers/{id}', 'ChildTransfersApiController::cancel_parent');
 $router->options('/api/teacher/child-transfers', 'ChildTransfersApiController::teacher_index');
 $router->get('/api/teacher/child-transfers', 'ChildTransfersApiController::teacher_index');
+$router->options('/api/teacher/child-transfers/options', 'ChildTransfersApiController::teacher_options');
+$router->get('/api/teacher/child-transfers/options', 'ChildTransfersApiController::teacher_options');
 $router->options('/api/teacher/children/{id}/transfers', 'ChildTransfersApiController::teacher_child_history');
 $router->get('/api/teacher/children/{id}/transfers', 'ChildTransfersApiController::teacher_child_history');
+$router->post('/api/teacher/children/{id}/transfers', 'ChildTransfersApiController::teacher_create');
 $router->options('/api/teacher/child-transfers/{id}', 'ChildTransfersApiController::teacher_update');
 $router->get('/api/teacher/child-transfers/{id}', 'ChildTransfersApiController::teacher_show');
 $router->patch('/api/teacher/child-transfers/{id}', 'ChildTransfersApiController::teacher_update');

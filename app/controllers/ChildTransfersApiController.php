@@ -13,8 +13,6 @@ class ChildTransfersApiController extends Controller
         'CDC Preference',
         'Other',
     ];
-    private const MAX_FILE_SIZE = 5242880;
-    private const MAX_FILES = 5;
 
     public function __construct()
     {
@@ -22,6 +20,258 @@ class ChildTransfersApiController extends Controller
         date_default_timezone_set('Asia/Manila');
         $this->call->library('api');
         $this->call->model('UsersModel');
+    }
+
+    public function teacher_options()
+    {
+        $this->api->require_method('GET');
+        $teacher = $this->authenticated_teacher();
+        if (!$teacher) return;
+
+        $current = $this->db->raw(
+            'SELECT d.id AS cdc_id, d.name AS cdc_name,
+                    TRIM(CONCAT_WS(\' \', u.first_name, u.last_name)) AS teacher_name
+             FROM teacher_profiles tp
+             JOIN cdcs d ON d.id = tp.cdc_id
+             JOIN users u ON u.id = tp.user_id
+             WHERE tp.user_id = ? AND tp.employment_status = \'active\'
+               AND d.status = \'active\' AND u.is_active = 1
+             LIMIT 1',
+            [(int) $teacher['id']]
+        )->fetch(PDO::FETCH_ASSOC);
+        if (!$current) {
+            $this->api->respond_error('You are not assigned to an active CDC.', 403);
+            return;
+        }
+
+        $destinations = $this->db->raw(
+            'SELECT d.id, d.name,
+                    teacher.id AS teacher_user_id,
+                    TRIM(CONCAT_WS(\' \', teacher.first_name, teacher.last_name)) AS teacher_name
+             FROM cdcs d
+             JOIN teacher_profiles tp ON tp.cdc_id = d.id
+             JOIN users teacher ON teacher.id = tp.user_id
+             WHERE d.id <> ? AND d.status = \'active\'
+               AND tp.employment_status = \'active\'
+               AND teacher.role = \'teacher\' AND teacher.is_active = 1
+               AND EXISTS (
+                   SELECT 1 FROM classes cl
+                   WHERE cl.cdc_id = d.id AND cl.status = \'active\'
+               )
+               AND EXISTS (
+                   SELECT 1 FROM notifications approval
+                   WHERE approval.related_type = \'teacher_verification\'
+                     AND approval.related_id = teacher.id
+                     AND approval.title = \'Approved\'
+               )
+             ORDER BY d.name, d.id',
+            [(int) $current['cdc_id']]
+        )->fetchAll(PDO::FETCH_ASSOC);
+        foreach ($destinations as &$destination) {
+            $destination['id'] = (int) $destination['id'];
+            $destination['teacher_user_id'] = (int) $destination['teacher_user_id'];
+        }
+        unset($destination);
+
+        $this->api->respond([
+            'status' => true,
+            'data' => [
+                'current_cdc_id' => (int) $current['cdc_id'],
+                'current_cdc_name' => $current['cdc_name'],
+                'current_teacher_name' => $current['teacher_name'],
+                'destinations' => $destinations,
+            ],
+        ]);
+    }
+
+    public function teacher_create($child_id)
+    {
+        $this->api->require_method('POST');
+        $teacher = $this->authenticated_teacher();
+        if (!$teacher) return;
+        $child_id = $this->valid_id($child_id);
+        if (!$child_id) return;
+
+        $input = $this->api->body(false);
+        if (!is_array($input)) {
+            $this->api->respond_error('Provide the transfer details.', 400);
+            return;
+        }
+        $destination_id = filter_var($input['destination_cdc_id'] ?? null, FILTER_VALIDATE_INT);
+        $reason = trim((string) ($input['reason'] ?? ''));
+        $other_reason = trim((string) ($input['other_reason'] ?? ''));
+        $remarks = trim((string) ($input['remarks'] ?? ''));
+        if (!$destination_id || !in_array($reason, self::REASONS, true)
+            || ($reason === 'Other' && $other_reason === '')
+            || mb_strlen($other_reason) > 500 || mb_strlen($remarks) > 5000) {
+            $this->api->respond_error('Choose a receiving CDC and a valid transfer reason.', 400);
+            return;
+        }
+
+        $now = date('Y-m-d H:i:s');
+        $this->db->transaction();
+        try {
+            $child = $this->db->raw(
+                'SELECT c.id, c.parent_user_id, c.class_id, c.enrollment_status,
+                        c.first_name, c.middle_name, c.last_name,
+                        cl.cdc_id AS current_cdc_id, current_cdc.name AS current_cdc_name,
+                        TRIM(CONCAT_WS(\' \', current_teacher.first_name, current_teacher.last_name)) AS current_teacher_name
+                 FROM children c
+                 JOIN classes cl ON cl.id = c.class_id
+                 JOIN cdcs current_cdc ON current_cdc.id = cl.cdc_id
+                 JOIN class_students cs ON cs.child_id = c.id AND cs.class_id = c.class_id
+                 JOIN teacher_profiles current_profile ON current_profile.cdc_id = cl.cdc_id
+                 JOIN users current_teacher ON current_teacher.id = current_profile.user_id
+                 WHERE c.id = ? AND c.enrollment_status = \'enrolled\'
+                   AND cl.status = \'active\' AND current_cdc.status = \'active\'
+                   AND current_profile.user_id = ?
+                   AND current_profile.employment_status = \'active\'
+                   AND current_teacher.role = \'teacher\' AND current_teacher.is_active = 1
+                 LIMIT 1 FOR UPDATE',
+                [$child_id, (int) $teacher['id']]
+            )->fetch(PDO::FETCH_ASSOC);
+            if (!$child) {
+                throw new DomainException('This child is not currently enrolled in one of your active classes.');
+            }
+            if ((int) $child['current_cdc_id'] === (int) $destination_id) {
+                throw new DomainException('Choose a different receiving CDC.');
+            }
+
+            $pending = $this->db->raw(
+                'SELECT id FROM child_transfer_requests
+                 WHERE child_id = ? AND status IN (\'pending\', \'awaiting_receiving_cdc\')
+                 LIMIT 1 FOR UPDATE',
+                [$child_id]
+            )->fetch(PDO::FETCH_ASSOC);
+            if ($pending) {
+                throw new DomainException('An older transfer request for this child is still awaiting review.');
+            }
+
+            $destination = $this->db->raw(
+                'SELECT d.id AS cdc_id, d.name AS cdc_name, d.capacity AS cdc_capacity,
+                        cl.id AS class_id, cl.capacity AS class_capacity,
+                        teacher.id AS teacher_id,
+                        TRIM(CONCAT_WS(\' \', teacher.first_name, teacher.last_name)) AS teacher_name
+                 FROM cdcs d
+                 JOIN teacher_profiles tp ON tp.cdc_id = d.id
+                 JOIN users teacher ON teacher.id = tp.user_id
+                 JOIN classes cl ON cl.cdc_id = d.id AND cl.status = \'active\'
+                 WHERE d.id = ? AND d.status = \'active\'
+                   AND tp.employment_status = \'active\'
+                   AND teacher.role = \'teacher\' AND teacher.is_active = 1
+                   AND EXISTS (
+                       SELECT 1 FROM notifications approval
+                       WHERE approval.related_type = \'teacher_verification\'
+                         AND approval.related_id = teacher.id
+                         AND approval.title = \'Approved\'
+                   )
+                 ORDER BY cl.id LIMIT 1 FOR UPDATE',
+                [(int) $destination_id]
+            )->fetch(PDO::FETCH_ASSOC);
+            if (!$destination) {
+                throw new DomainException('The selected CDC has no active, approved receiving teacher and class.');
+            }
+
+            $class_count = (int) $this->db->raw(
+                'SELECT COUNT(*) AS total FROM children
+                 WHERE class_id = ? AND enrollment_status = \'enrolled\'',
+                [(int) $destination['class_id']]
+            )->fetch(PDO::FETCH_ASSOC)['total'];
+            $cdc_count = (int) $this->db->raw(
+                'SELECT COUNT(*) AS total
+                 FROM children c
+                 JOIN classes cl ON cl.id = c.class_id
+                 WHERE cl.cdc_id = ? AND c.enrollment_status = \'enrolled\'',
+                [(int) $destination['cdc_id']]
+            )->fetch(PDO::FETCH_ASSOC)['total'];
+            if ((int) $destination['class_capacity'] > 0
+                && $class_count >= (int) $destination['class_capacity']) {
+                throw new DomainException('The receiving class has reached its enrollment capacity.');
+            }
+            if ((int) $destination['cdc_capacity'] > 0
+                && $cdc_count >= (int) $destination['cdc_capacity']) {
+                throw new DomainException('The receiving CDC has reached its enrollment capacity.');
+            }
+
+            $this->db->table('children')->where('id', $child_id)->update([
+                'class_id' => (int) $destination['class_id'],
+                'preferred_cdc_id' => (int) $destination['cdc_id'],
+                'updated_at' => $now,
+            ]);
+            $existing_roster = $this->db->table('class_students')
+                ->select('id')
+                ->where('class_id', (int) $destination['class_id'])
+                ->where('child_id', $child_id)
+                ->get();
+            if (!$existing_roster) {
+                $this->db->table('class_students')->insert([
+                    'class_id' => (int) $destination['class_id'],
+                    'child_id' => $child_id,
+                    'enrolled_at' => $now,
+                ]);
+            }
+
+            $this->db->table('child_transfer_requests')->insert([
+                'reference' => 'TRF-' . strtoupper(bin2hex(random_bytes(5))),
+                'child_id' => $child_id,
+                'parent_user_id' => (int) $child['parent_user_id'],
+                'previous_cdc_id' => (int) $child['current_cdc_id'],
+                'destination_cdc_id' => (int) $destination['cdc_id'],
+                'previous_teacher_user_id' => (int) $teacher['id'],
+                'receiving_teacher_user_id' => (int) $destination['teacher_id'],
+                'reason' => $reason,
+                'other_reason' => $reason === 'Other' ? $other_reason : null,
+                'requested_date' => date('Y-m-d'),
+                'remarks' => $remarks !== '' ? $remarks : null,
+                'status' => 'completed',
+                'current_teacher_approved_at' => $now,
+                'completed_at' => $now,
+                'created_at' => $now,
+                'updated_at' => $now,
+            ]);
+            $transfer_id = (int) $this->db->last_id();
+            $child_name = $this->child_name($child);
+            $reason_label = $reason === 'Other' ? $other_reason : $reason;
+            $this->record_event(
+                $transfer_id,
+                (int) $teacher['id'],
+                'transfer_completed_by_current_teacher',
+                $remarks
+            );
+            $this->notify_user(
+                (int) $child['parent_user_id'],
+                (int) $teacher['id'],
+                'Child transfer completed',
+                $child_name . ' has been transferred from ' . $child['current_teacher_name']
+                    . ' to ' . $destination['teacher_name'] . ' at ' . $destination['cdc_name']
+                    . ' on ' . date('F j, Y') . '.',
+                $transfer_id,
+                '/parent/children'
+            );
+            $this->notify_admins(
+                (int) $teacher['id'],
+                'Child transfer completed',
+                $child_name . ' (Child ID ' . $child_id . ') was transferred from '
+                    . $child['current_teacher_name'] . ' (' . $child['current_cdc_name'] . ') to '
+                    . $destination['teacher_name'] . ' (' . $destination['cdc_name'] . '). Reason: '
+                    . $reason_label . '. Transfer date: ' . date('F j, Y') . '.',
+                $transfer_id
+            );
+            $this->db->commit();
+        } catch (DomainException $error) {
+            $this->db->roll_back();
+            $this->api->respond_error($error->getMessage(), 409);
+            return;
+        } catch (Throwable $error) {
+            $this->db->roll_back();
+            throw $error;
+        }
+
+        $this->api->respond([
+            'status' => true,
+            'message' => 'The child was transferred successfully.',
+            'data' => ['transfer_id' => $transfer_id],
+        ]);
     }
 
     public function centers()
@@ -104,175 +354,11 @@ class ChildTransfersApiController extends Controller
         $this->api->require_method('POST');
         $parent = $this->authenticated_parent();
         if (!$parent) return;
-        $child_id = $this->valid_id($child_id);
-        if (!$child_id) return;
-
-        $reason = trim((string) ($_POST['reason'] ?? ''));
-        $other_reason = trim((string) ($_POST['other_reason'] ?? ''));
-        $address = trim((string) ($_POST['new_address'] ?? ''));
-        $barangay = trim((string) ($_POST['new_barangay'] ?? ''));
-        $municipality = trim((string) ($_POST['new_municipality'] ?? ''));
-        $remarks = trim((string) ($_POST['remarks'] ?? ''));
-        $destination_id = filter_var($_POST['destination_cdc_id'] ?? null, FILTER_VALIDATE_INT);
-        $requested_date = $_POST['requested_date'] ?? null;
-        if (!in_array($reason, self::REASONS, true)
-            || ($reason === 'Other' && $other_reason === '')
-            || ($reason === 'Change of Residence'
-                && $address === '' && $barangay === '' && $municipality === '')
-            || !$destination_id || !$this->valid_date($requested_date)
-            || mb_strlen($other_reason) > 500 || mb_strlen($address) > 255
-            || mb_strlen($barangay) > 120 || mb_strlen($municipality) > 120
-            || mb_strlen($remarks) > 5000
-            || !in_array($_POST['confirmed'] ?? null, ['1', 'true'], true)) {
-            $this->api->respond_error('Complete the required transfer fields and confirm that the information is accurate.', 400);
-            return;
-        }
-        if ($requested_date < date('Y-m-d')) {
-            $this->api->respond_error('The requested transfer date cannot be in the past.', 400);
-            return;
-        }
-        $files = $this->validated_files();
-        if ($files === false) return;
-
-        $this->db->transaction();
-        $stored_files = [];
-        try {
-            $child = $this->db->raw(
-                'SELECT c.id, c.parent_user_id, c.enrollment_status, c.class_id,
-                        c.preferred_cdc_id, c.first_name, c.middle_name, c.last_name,
-                        cl.cdc_id AS current_cdc_id
-                 FROM children c
-                 LEFT JOIN classes cl ON cl.id = c.class_id
-                 WHERE c.id = ? AND c.parent_user_id = ? LIMIT 1 FOR UPDATE',
-                [$child_id, (int) $parent['id']]
-            )->fetch(PDO::FETCH_ASSOC);
-            if (!$child) {
-                throw new DomainException('Child profile not found.');
-            }
-            if ($child['enrollment_status'] !== 'enrolled' || !$child['current_cdc_id']) {
-                throw new DomainException('Only a child currently enrolled in a CDC can be transferred.');
-            }
-            if ((int) $child['current_cdc_id'] === (int) $destination_id) {
-                throw new DomainException('Choose a different destination CDC.');
-            }
-            $receiving = $this->db->raw(
-                'SELECT d.id, teacher.id AS teacher_id
-                 FROM cdcs d
-                 JOIN teacher_profiles tp ON tp.cdc_id = d.id
-                 JOIN users teacher ON teacher.id = tp.user_id
-                 WHERE d.id = ? AND d.status = \'active\'
-                   AND tp.employment_status = \'active\'
-                   AND teacher.role = \'teacher\' AND teacher.is_active = 1
-                   AND EXISTS (
-                       SELECT 1 FROM classes cl
-                       WHERE cl.cdc_id = d.id AND cl.status = \'active\'
-                   )
-                   AND EXISTS (
-                       SELECT 1 FROM notifications approval
-                       WHERE approval.related_type = \'teacher_verification\'
-                         AND approval.related_id = teacher.id AND approval.title = \'Approved\'
-                   )
-                 LIMIT 1 FOR UPDATE',
-                [(int) $destination_id]
-            )->fetch(PDO::FETCH_ASSOC);
-            if (!$receiving) {
-                throw new DomainException('The selected CDC is not available for transfers.');
-            }
-            $pending = $this->db->raw(
-                'SELECT id FROM child_transfer_requests
-                 WHERE child_id = ? AND status IN (\'pending\', \'awaiting_receiving_cdc\')
-                 LIMIT 1 FOR UPDATE',
-                [$child_id]
-            )->fetch(PDO::FETCH_ASSOC);
-            if ($pending) {
-                throw new DomainException('This child already has a transfer request awaiting review.');
-            }
-            $previous_teacher = $this->db->raw(
-                'SELECT tp.user_id
-                 FROM teacher_profiles tp
-                 JOIN users teacher ON teacher.id = tp.user_id
-                 WHERE tp.cdc_id = ? AND tp.employment_status = \'active\'
-                   AND teacher.role = \'teacher\' AND teacher.is_active = 1
-                 ORDER BY tp.user_id LIMIT 1',
-                [(int) $child['current_cdc_id']]
-            )->fetch(PDO::FETCH_ASSOC);
-            if (!$previous_teacher) {
-                throw new DomainException('The current CDC has no active teacher available to review this transfer.');
-            }
-            $now = date('Y-m-d H:i:s');
-            $this->db->table('child_transfer_requests')->insert([
-                'reference' => 'TRF-' . strtoupper(bin2hex(random_bytes(5))),
-                'child_id' => $child_id,
-                'parent_user_id' => (int) $parent['id'],
-                'previous_cdc_id' => (int) $child['current_cdc_id'],
-                'destination_cdc_id' => (int) $destination_id,
-                'previous_teacher_user_id' => $previous_teacher
-                    ? (int) $previous_teacher['user_id']
-                    : null,
-                'receiving_teacher_user_id' => (int) $receiving['teacher_id'],
-                'reason' => $reason,
-                'other_reason' => $reason === 'Other' ? $other_reason : null,
-                'new_address' => $address !== '' ? $address : null,
-                'new_barangay' => $barangay !== '' ? $barangay : null,
-                'new_municipality' => $municipality !== '' ? $municipality : null,
-                'requested_date' => $requested_date,
-                'remarks' => $remarks !== '' ? $remarks : null,
-                'created_at' => $now,
-                'updated_at' => $now,
-            ]);
-            $transfer_id = (int) $this->db->last_id();
-            $this->record_event($transfer_id, (int) $parent['id'], 'request_submitted', $remarks);
-            foreach ($files as $file) {
-                $stored = $this->store_file($file, $transfer_id);
-                $stored_files[] = $stored['absolute_path'];
-                $this->db->table('child_transfer_documents')->insert([
-                    'transfer_id' => $transfer_id,
-                    'original_name' => $stored['name'],
-                    'storage_path' => $stored['relative_path'],
-                    'mime_type' => $stored['mime'],
-                    'file_size' => $stored['size'],
-                    'sha256' => $stored['sha256'],
-                    'uploaded_at' => $now,
-                ]);
-            }
-            $child_name = trim(implode(' ', array_filter([
-                $child['first_name'], $child['middle_name'], $child['last_name'],
-            ])));
-            $this->notify_user(
-                (int) ($previous_teacher['user_id'] ?? 0),
-                null,
-                'Child transfer request',
-                $child_name . ' has a new transfer request for review.',
-                $transfer_id,
-                '/teacher/students'
-            );
-            $this->notify_admins(
-                (int) $parent['id'],
-                'Child transfer request submitted',
-                $child_name . ' has a new transfer request awaiting the current CDC teacher.',
-                $transfer_id
-            );
-            $this->db->commit();
-        } catch (DomainException $error) {
-            $this->db->roll_back();
-            foreach ($stored_files as $path) {
-                if (is_file($path)) unlink($path);
-            }
-            $this->api->respond_error($error->getMessage(), 409);
-            return;
-        } catch (Throwable $error) {
-            $this->db->roll_back();
-            foreach ($stored_files as $path) {
-                if (is_file($path)) unlink($path);
-            }
-            throw $error;
-        }
-
-        $this->api->respond([
-            'status' => true,
-            'message' => 'Transfer request submitted. Your child remains enrolled at the current CDC until the transfer is completed.',
-            'data' => ['id' => $transfer_id],
-        ], 201);
+        $this->api->respond_error(
+            'Child transfers are processed directly by the current teacher. Please contact the teacher assigned to the child.',
+            403
+        );
+        return;
     }
 
     public function cancel_parent($id)
@@ -348,7 +434,7 @@ class ChildTransfersApiController extends Controller
                     t.new_municipality, t.requested_date, t.remarks, t.status,
                     t.previous_teacher_remarks, t.receiving_teacher_remarks,
                     t.source_dismissed_at, t.current_teacher_approved_at,
-                    t.receiving_teacher_accepted_at, t.created_at,
+                    t.receiving_teacher_accepted_at, t.created_at, t.completed_at,
                     c.first_name, c.middle_name, c.last_name, c.birth_date,
                     c.gender, c.nickname,
                     (c.profile_photo IS NOT NULL AND c.profile_photo <> \'\') AS has_profile_photo,
@@ -359,11 +445,18 @@ class ChildTransfersApiController extends Controller
              JOIN users parent ON parent.id = t.parent_user_id
              JOIN cdcs previous ON previous.id = t.previous_cdc_id
              JOIN cdcs destination ON destination.id = t.destination_cdc_id
-             WHERE (t.previous_teacher_user_id = ? AND t.status = \'pending\'
-                    AND t.source_dismissed_at IS NULL)
-                OR (t.receiving_teacher_user_id = ? AND t.status = \'awaiting_receiving_cdc\')
+             WHERE ((t.previous_teacher_user_id = ? AND t.status = \'pending\'
+                     AND t.source_dismissed_at IS NULL)
+                 OR (t.receiving_teacher_user_id = ? AND t.status = \'awaiting_receiving_cdc\')
+                 OR (t.status = \'completed\'
+                     AND (t.previous_teacher_user_id = ? OR t.receiving_teacher_user_id = ?)))
              ORDER BY t.created_at, t.id',
-            [(int) $teacher['id'], (int) $teacher['id']]
+            [
+                (int) $teacher['id'],
+                (int) $teacher['id'],
+                (int) $teacher['id'],
+                (int) $teacher['id'],
+            ]
         )->fetchAll(PDO::FETCH_ASSOC);
         foreach ($requests as &$request) {
             $request['id'] = (int) $request['id'];
@@ -857,84 +950,6 @@ class ChildTransfersApiController extends Controller
             'user_id' => (int) $user_id,
             'created_at' => date('Y-m-d H:i:s'),
         ]);
-    }
-
-    private function validated_files()
-    {
-        if (!isset($_FILES['documents'])) return [];
-        $input = $_FILES['documents'];
-        if (!is_array($input['name'] ?? null)) {
-            $this->api->respond_error('Transfer documents must be uploaded as a file list.', 400);
-            return false;
-        }
-        $count = count($input['name']);
-        if ($count > self::MAX_FILES) {
-            $this->api->respond_error('Upload no more than five supporting documents.', 400);
-            return false;
-        }
-        $files = [];
-        $finfo = finfo_open(FILEINFO_MIME_TYPE);
-        if (!$finfo) {
-            throw new RuntimeException('Could not validate supporting document file types.');
-        }
-        $extensions = [
-            'application/pdf' => ['pdf'],
-            'image/jpeg' => ['jpg', 'jpeg'],
-            'image/png' => ['png'],
-        ];
-        for ($i = 0; $i < $count; $i++) {
-            if (($input['error'][$i] ?? UPLOAD_ERR_NO_FILE) === UPLOAD_ERR_NO_FILE) continue;
-            if (($input['error'][$i] ?? UPLOAD_ERR_OK) !== UPLOAD_ERR_OK
-                || (int) $input['size'][$i] <= 0
-                || (int) $input['size'][$i] > self::MAX_FILE_SIZE
-                || !is_uploaded_file($input['tmp_name'][$i])) {
-                finfo_close($finfo);
-                $this->api->respond_error('Each supporting document must be no larger than 5 MB.', 400);
-                return false;
-            }
-            $mime = finfo_file($finfo, $input['tmp_name'][$i]);
-            $extension = strtolower(pathinfo($input['name'][$i], PATHINFO_EXTENSION));
-            if (!isset($extensions[$mime]) || !in_array($extension, $extensions[$mime], true)) {
-                finfo_close($finfo);
-                $this->api->respond_error('Supporting documents must be valid PDF, JPG, or PNG files.', 400);
-                return false;
-            }
-            $files[] = [
-                'tmp_name' => $input['tmp_name'][$i],
-                'name' => basename((string) $input['name'][$i]),
-                'size' => (int) $input['size'][$i],
-                'mime' => $mime,
-                'extension' => $extension,
-            ];
-        }
-        finfo_close($finfo);
-        return $files;
-    }
-
-    private function store_file(array $file, $transfer_id)
-    {
-        $directory = ROOT_DIR . 'runtime/uploads/child-transfers/' . (int) $transfer_id;
-        if (!is_dir($directory) && !mkdir($directory, 0750, true) && !is_dir($directory)) {
-            throw new RuntimeException('Could not create the private transfer document directory.');
-        }
-        $stored_name = bin2hex(random_bytes(20)) . '.' . $file['extension'];
-        $absolute_path = $directory . DIRECTORY_SEPARATOR . $stored_name;
-        if (!move_uploaded_file($file['tmp_name'], $absolute_path)) {
-            throw new RuntimeException('Could not store a transfer document.');
-        }
-        $hash = hash_file('sha256', $absolute_path);
-        if ($hash === false) {
-            unlink($absolute_path);
-            throw new RuntimeException('Could not verify an uploaded transfer document.');
-        }
-        return [
-            'absolute_path' => $absolute_path,
-            'relative_path' => 'runtime/uploads/child-transfers/' . (int) $transfer_id . '/' . $stored_name,
-            'name' => $file['name'],
-            'size' => $file['size'],
-            'mime' => $file['mime'],
-            'sha256' => $hash,
-        ];
     }
 
     private function authenticated_parent()
