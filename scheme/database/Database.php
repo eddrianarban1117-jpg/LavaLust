@@ -298,6 +298,9 @@ class Database {
         try {
             $this->db = new PDO($dsn, $username, $password, $options);
             $this->driver = $this->db->getAttribute(PDO::ATTR_DRIVER_NAME);
+            if ($this->driver === 'mysql') {
+                $this->db->exec("SET time_zone = '+08:00'");
+            }
         } catch (Exception $e) {
             $error_info = $e instanceof PDOException && is_array($e->errorInfo)
                 ? $e->errorInfo
